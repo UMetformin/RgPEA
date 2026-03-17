@@ -1,0 +1,582 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+# Ruminococcus Complete Multi-level Analysis
+# 完整的门-属-种三级分析（包含重分类物种）
+# Author: Analysis Script
+# Date: 2025-10-21
+
+# Load required libraries
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(writexl)
+
+# Set working directory
+setwd("C:/Users/ASUS/Desktop/Gut")
+
+# ============================================================================
+# 1. Read and prepare data
+# ============================================================================
+cat("Reading microbiota data...\n")
+microbiota_data <- read_excel("Gut microbiota.xlsx")
+
+# Get sample names (exclude first column which contains taxonomy)
+all_colnames <- colnames(microbiota_data)
+sample_names <- all_colnames[-1]
+
+# Create group labels
+groups <- ifelse(grepl("Normal aging", sample_names), "Normal Aging", "NCD")
+
+cat(paste("Total samples found:", length(sample_names), "\n"))
+cat(paste("Normal Aging samples:", sum(groups == "Normal Aging"), "\n"))
+cat(paste("NCD samples:", sum(groups == "NCD"), "\n"))
+
+# ============================================================================
+# 2. Extract Ruminococcus species (包含重新分类的物种)
+# ============================================================================
+cat("\nExtracting Ruminococcus data (including reclassified species)...\n")
+
+taxa <- microbiota_data[[1]]
+
+# 双重搜索：属级别 + 种级别
+ruminococcus_idx <- unique(c(
+  grep("g__Ruminococcus", taxa, ignore.case = TRUE),
+  grep("s__Ruminococcus", taxa, ignore.case = TRUE)
+))
+
+if(length(ruminococcus_idx) == 0) {
+  stop("No Ruminococcus species found in the data!")
+}
+
+cat(paste("Found", length(ruminococcus_idx), "Ruminococcus entries\n"))
+
+# Extract data
+ruminococcus_data <- microbiota_data[ruminococcus_idx, ]
+ruminococcus_abundance <- ruminococcus_data[, -1]
+
+# ============================================================================
+# 3. Parse taxonomic information
+# ============================================================================
+cat("Parsing taxonomic information...\n")
+
+parse_taxonomy <- function(tax_string) {
+  parts <- strsplit(as.character(tax_string), "\\|")[[1]]
+  
+  phylum <- gsub("p__", "", parts[grep("p__", parts)])
+  class <- gsub("c__", "", parts[grep("c__", parts)])
+  order <- gsub("o__", "", parts[grep("o__", parts)])
+  family <- gsub("f__", "", parts[grep("f__", parts)])
+  genus <- gsub("g__", "", parts[grep("g__", parts)])
+  species <- gsub("s__", "", parts[grep("s__", parts)])
+  
+  # 检测重新分类的物种
+  reclassified <- FALSE
+  original_genus <- "Ruminococcus"
+  
+  if(length(species) > 0 && length(genus) > 0) {
+    if(grepl("Ruminococcus", species, ignore.case = TRUE) && 
+       !grepl("Ruminococcus", genus, ignore.case = TRUE)) {
+      reclassified <- TRUE
+      species <- gsub(paste0(genus, "_"), "", species)
+    } else {
+      species <- gsub(paste0(genus, "_"), "", species)
+    }
+  }
+  
+  return(list(
+    phylum = ifelse(length(phylum) > 0, phylum, "Unknown"),
+    class = ifelse(length(class) > 0, class, "Unknown"),
+    order = ifelse(length(order) > 0, order, "Unknown"),
+    family = ifelse(length(family) > 0, family, "Unknown"),
+    current_genus = ifelse(length(genus) > 0, genus, "Unknown"),
+    species = ifelse(length(species) > 0, species, "Unknown"),
+    reclassified = reclassified,
+    original_genus = original_genus,
+    full_name = tax_string
+  ))
+}
+
+ruminococcus_taxa <- ruminococcus_data[[1]]
+taxonomy_list <- lapply(ruminococcus_taxa, parse_taxonomy)
+
+# ============================================================================
+# 4. Prepare data for analysis
+# ============================================================================
+cat("Preparing data for statistical analysis...\n")
+
+results_list <- list()
+
+for(i in 1:nrow(ruminococcus_data)) {
+  tax_info <- taxonomy_list[[i]]
+  abundances <- as.numeric(ruminococcus_abundance[i, ])
+  
+  if(length(abundances) != length(sample_names)) {
+    cat(paste("Warning: Row", i, "dimension mismatch\n"))
+    next
+  }
+  
+  # 创建显示名称
+  display_name <- if(tax_info$reclassified) {
+    paste0(tax_info$species, " [", tax_info$current_genus, "]")
+  } else {
+    tax_info$species
+  }
+  
+  df <- data.frame(
+    Sample = sample_names,
+    Group = groups,
+    Abundance = abundances,
+    Phylum = tax_info$phylum,
+    Class = tax_info$class,
+    Order = tax_info$order,
+    Family = tax_info$family,
+    Current_genus = tax_info$current_genus,
+    Original_genus = tax_info$original_genus,
+    Species = tax_info$species,
+    Display_name = display_name,
+    Reclassified = tax_info$reclassified,
+    Full_taxonomy = tax_info$full_name,
+    stringsAsFactors = FALSE
+  )
+  
+  results_list[[i]] <- df
+}
+
+all_data <- do.call(rbind, results_list)
+
+cat(paste("\nTotal data rows:", nrow(all_data), "\n"))
+cat(paste("Unique species:", length(unique(all_data$Species)), "\n"))
+cat(paste("Reclassified species:", sum(unique(all_data$Reclassified)), "\n"))
+
+# ============================================================================
+# 5. Statistical test function
+# ============================================================================
+
+perform_stats <- function(data, group_var) {
+  normal <- data$Abundance[data$Group == "Normal Aging"]
+  ncd <- data$Abundance[data$Group == "NCD"]
+  
+  test_result <- wilcox.test(normal, ncd)
+  
+  stats <- data %>%
+    group_by(Group) %>%
+    summarise(
+      Mean = mean(Abundance),
+      SD = sd(Abundance),
+      Median = median(Abundance),
+      N = n(),
+      .groups = 'drop'
+    )
+  
+  mean_normal <- stats$Mean[stats$Group == "Normal Aging"]
+  mean_ncd <- stats$Mean[stats$Group == "NCD"]
+  fold_change <- if(mean_normal > 0) mean_ncd / mean_normal else NA
+  log2_fc <- if(!is.na(fold_change)) log2(fold_change) else NA
+  
+  p_value <- test_result$p.value
+  sig_label <- case_when(
+    p_value < 0.001 ~ "***",
+    p_value < 0.01 ~ "**",
+    p_value < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+  
+  return(list(
+    stats = stats,
+    p_value = p_value,
+    sig_label = sig_label,
+    fold_change = fold_change,
+    log2_fold_change = log2_fc
+  ))
+}
+
+# ============================================================================
+# 6. SPECIES-LEVEL ANALYSIS (种级别分析)
+# ============================================================================
+cat("\n=== SPECIES-LEVEL ANALYSIS ===\n")
+
+species_stats <- all_data %>%
+  group_by(Phylum, Class, Order, Family, Current_genus, Original_genus,
+           Species, Display_name, Reclassified, Full_taxonomy) %>%
+  group_modify(~ {
+    result <- perform_stats(.x, "Species")
+    data.frame(
+      Normal_Mean = result$stats$Mean[result$stats$Group == "Normal Aging"],
+      Normal_SD = result$stats$SD[result$stats$Group == "Normal Aging"],
+      Normal_Median = result$stats$Median[result$stats$Group == "Normal Aging"],
+      NCD_Mean = result$stats$Mean[result$stats$Group == "NCD"],
+      NCD_SD = result$stats$SD[result$stats$Group == "NCD"],
+      NCD_Median = result$stats$Median[result$stats$Group == "NCD"],
+      Fold_Change = result$fold_change,
+      Log2_FC = result$log2_fold_change,
+      P_value = result$p_value,
+      Significance = result$sig_label
+    )
+  }) %>%
+  arrange(P_value)
+
+write.csv(species_stats, "Ruminococcus_SPECIES_statistics.csv", row.names = FALSE)
+
+cat(paste("Significant species (p < 0.05):", sum(species_stats$P_value < 0.05), "\n"))
+
+# ============================================================================
+# 7. GENUS-LEVEL ANALYSIS (属级别分析 - 两种方式)
+# ============================================================================
+cat("\n=== GENUS-LEVEL ANALYSIS ===\n")
+
+# 方式1: 按当前属分类（Current genus）
+cat("7.1 Analysis by CURRENT genus classification...\n")
+genus_current_data <- all_data %>%
+  group_by(Sample, Group, Current_genus, Phylum) %>%
+  summarise(Abundance = sum(Abundance), .groups = 'drop')
+
+genus_current_stats <- genus_current_data %>%
+  group_by(Current_genus, Phylum) %>%
+  group_modify(~ {
+    result <- perform_stats(.x, "Genus")
+    data.frame(
+      Normal_Mean = result$stats$Mean[result$stats$Group == "Normal Aging"],
+      Normal_SD = result$stats$SD[result$stats$Group == "Normal Aging"],
+      NCD_Mean = result$stats$Mean[result$stats$Group == "NCD"],
+      NCD_SD = result$stats$SD[result$stats$Group == "NCD"],
+      Fold_Change = result$fold_change,
+      Log2_FC = result$log2_fold_change,
+      P_value = result$p_value,
+      Significance = result$sig_label
+    )
+  })
+
+write.csv(genus_current_stats, "Ruminococcus_GENUS_current_statistics.csv", row.names = FALSE)
+
+# 方式2: 按原始Ruminococcus概念汇总（所有相关物种）
+cat("7.2 Analysis by ORIGINAL Ruminococcus concept (all species combined)...\n")
+genus_original_data <- all_data %>%
+  group_by(Sample, Group, Original_genus, Phylum) %>%
+  summarise(Abundance = sum(Abundance), .groups = 'drop')
+
+genus_original_stats <- genus_original_data %>%
+  group_by(Original_genus, Phylum) %>%
+  group_modify(~ {
+    result <- perform_stats(.x, "Genus")
+    data.frame(
+      Normal_Mean = result$stats$Mean[result$stats$Group == "Normal Aging"],
+      Normal_SD = result$stats$SD[result$stats$Group == "Normal Aging"],
+      NCD_Mean = result$stats$Mean[result$stats$Group == "NCD"],
+      NCD_SD = result$stats$SD[result$stats$Group == "NCD"],
+      Fold_Change = result$fold_change,
+      Log2_FC = result$log2_fold_change,
+      P_value = result$p_value,
+      Significance = result$sig_label
+    )
+  })
+
+write.csv(genus_original_stats, "Ruminococcus_GENUS_original_statistics.csv", row.names = FALSE)
+
+# 属级别可视化 - 当前分类
+p_genus_current <- ggplot(genus_current_data, aes(x = Group, y = Abundance, fill = Group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.15, size = 2.5, alpha = 0.6) +
+  facet_wrap(~ Current_genus, scales = "free_y") +
+  scale_fill_manual(values = c("Normal Aging" = "#4DBBD5", "NCD" = "#E64B35")) +
+  scale_x_discrete(limits = c("Normal Aging", "NCD")) +
+  labs(
+    title = "Genus-Level Analysis (Current Classification)",
+    subtitle = "Each panel shows a different genus containing Ruminococcus species",
+    x = NULL,
+    y = "Total Relative Abundance (Genus-level)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 10, color = "gray40"),
+    legend.position = "bottom",
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold")
+  )
+
+ggsave("Ruminococcus_GENUS_current_comparison.pdf", p_genus_current, 
+       width = 10, height = 6, dpi = 300)
+ggsave("Ruminococcus_GENUS_current_comparison.png", p_genus_current, 
+       width = 10, height = 6, dpi = 300)
+
+# 属级别可视化 - 原始概念（所有Ruminococcus汇总）
+stats_genus_orig <- perform_stats(genus_original_data, "Genus")
+y_max_g <- max(genus_original_data$Abundance) * 1.15
+y_sig_g <- max(genus_original_data$Abundance) * 1.1
+
+p_genus_original <- ggplot(genus_original_data, aes(x = Group, y = Abundance, fill = Group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.15, size = 2.5, alpha = 0.6) +
+  scale_fill_manual(values = c("Normal Aging" = "#4DBBD5", "NCD" = "#E64B35")) +
+  scale_x_discrete(limits = c("Normal Aging", "NCD")) +
+  labs(
+    title = "Genus-Level: All Ruminococcus Species Combined",
+    subtitle = paste0("Including reclassified species (e.g., R. gnavus now in Blautia)\n",
+                     "Significance: ", genus_original_stats$Significance,
+                     " | p = ", format(genus_original_stats$P_value, digits = 3),
+                     " | FC = ", format(genus_original_stats$Fold_Change, digits = 3)),
+    x = NULL,
+    y = "Total Relative Abundance"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10, color = "gray40"),
+    legend.position = "bottom"
+  )
+
+if(stats_genus_orig$sig_label != "ns") {
+  p_genus_original <- p_genus_original +
+    geom_segment(aes(x = 1, xend = 2, y = y_sig_g, yend = y_sig_g), 
+                 color = "black", linewidth = 0.5) +
+    geom_segment(aes(x = 1, xend = 1, y = y_sig_g, yend = y_sig_g * 0.98), 
+                 color = "black", linewidth = 0.5) +
+    geom_segment(aes(x = 2, xend = 2, y = y_sig_g, yend = y_sig_g * 0.98), 
+                 color = "black", linewidth = 0.5) +
+    annotate("text", x = 1.5, y = y_max_g, label = stats_genus_orig$sig_label, 
+             size = 8, fontface = "bold")
+}
+
+ggsave("Ruminococcus_GENUS_original_comparison.pdf", p_genus_original, 
+       width = 8, height = 6, dpi = 300)
+ggsave("Ruminococcus_GENUS_original_comparison.png", p_genus_original, 
+       width = 8, height = 6, dpi = 300)
+
+# ============================================================================
+# 8. PHYLUM-LEVEL ANALYSIS (门级别分析)
+# ============================================================================
+cat("\n=== PHYLUM-LEVEL ANALYSIS ===\n")
+
+phylum_data <- all_data %>%
+  group_by(Sample, Group, Phylum) %>%
+  summarise(Abundance = sum(Abundance), .groups = 'drop')
+
+phylum_stats <- phylum_data %>%
+  group_by(Phylum) %>%
+  group_modify(~ {
+    result <- perform_stats(.x, "Phylum")
+    data.frame(
+      Normal_Mean = result$stats$Mean[result$stats$Group == "Normal Aging"],
+      Normal_SD = result$stats$SD[result$stats$Group == "Normal Aging"],
+      NCD_Mean = result$stats$Mean[result$stats$Group == "NCD"],
+      NCD_SD = result$stats$SD[result$stats$Group == "NCD"],
+      Fold_Change = result$fold_change,
+      Log2_FC = result$log2_fold_change,
+      P_value = result$p_value,
+      Significance = result$sig_label
+    )
+  })
+
+write.csv(phylum_stats, "Ruminococcus_PHYLUM_statistics.csv", row.names = FALSE)
+
+# 门级别可视化
+stats_phylum <- perform_stats(phylum_data, "Phylum")
+y_max_p <- max(phylum_data$Abundance) * 1.15
+y_sig_p <- max(phylum_data$Abundance) * 1.1
+
+p_phylum <- ggplot(phylum_data, aes(x = Group, y = Abundance, fill = Group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.15, size = 2.5, alpha = 0.6) +
+  scale_fill_manual(values = c("Normal Aging" = "#4DBBD5", "NCD" = "#E64B35")) +
+  scale_x_discrete(limits = c("Normal Aging", "NCD")) +
+  labs(
+    title = "Phylum-Level: All Ruminococcus Species",
+    subtitle = paste0("Phylum: ", unique(phylum_data$Phylum), 
+                     " | Significance: ", phylum_stats$Significance,
+                     " | p = ", format(phylum_stats$P_value, digits = 3),
+                     " | FC = ", format(phylum_stats$Fold_Change, digits = 3)),
+    x = NULL,
+    y = "Total Relative Abundance (Phylum-level)"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 10, color = "gray40"),
+    legend.position = "bottom"
+  )
+
+if(stats_phylum$sig_label != "ns") {
+  p_phylum <- p_phylum +
+    geom_segment(aes(x = 1, xend = 2, y = y_sig_p, yend = y_sig_p), 
+                 color = "black", linewidth = 0.5) +
+    geom_segment(aes(x = 1, xend = 1, y = y_sig_p, yend = y_sig_p * 0.98), 
+                 color = "black", linewidth = 0.5) +
+    geom_segment(aes(x = 2, xend = 2, y = y_sig_p, yend = y_sig_p * 0.98), 
+                 color = "black", linewidth = 0.5) +
+    annotate("text", x = 1.5, y = y_max_p, label = stats_phylum$sig_label, 
+             size = 8, fontface = "bold")
+}
+
+ggsave("Ruminococcus_PHYLUM_comparison.pdf", p_phylum, 
+       width = 8, height = 6, dpi = 300)
+ggsave("Ruminococcus_PHYLUM_comparison.png", p_phylum, 
+       width = 8, height = 6, dpi = 300)
+
+# ============================================================================
+# 9. Species-level individual plots
+# ============================================================================
+cat("\n=== Creating individual species plots ===\n")
+
+unique_species_data <- all_data %>%
+  distinct(Species, Display_name, .keep_all = TRUE)
+
+for(i in 1:nrow(unique_species_data)) {
+  species <- unique_species_data$Species[i]
+  display <- unique_species_data$Display_name[i]
+  
+  plot_data <- all_data %>% filter(Species == species)
+  stats <- perform_stats(plot_data, species)
+  
+  y_max <- max(plot_data$Abundance) * 1.15
+  y_sig <- max(plot_data$Abundance) * 1.1
+  
+  subtitle_text <- if(unique(plot_data$Reclassified)) {
+    paste0("Current genus: ", unique(plot_data$Current_genus), 
+           " (Originally: Ruminococcus)")
+  } else {
+    paste("Genus:", unique(plot_data$Current_genus))
+  }
+  
+  p <- ggplot(plot_data, aes(x = Group, y = Abundance, fill = Group)) +
+    geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.6) +
+    geom_jitter(width = 0.15, size = 2.5, alpha = 0.6) +
+    scale_fill_manual(values = c("Normal Aging" = "#4DBBD5", "NCD" = "#E64B35")) +
+    scale_x_discrete(limits = c("Normal Aging", "NCD")) +
+    labs(
+      title = display,
+      subtitle = subtitle_text,
+      x = NULL,
+      y = "Relative Abundance",
+      caption = paste0("Wilcoxon test: p = ", format(stats$p_value, digits = 3),
+                      " | FC = ", format(stats$fold_change, digits = 3))
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      plot.subtitle = element_text(hjust = 0.5, size = 10, color = "gray40"),
+      legend.position = "none"
+    )
+  
+  if(stats$sig_label != "ns") {
+    p <- p +
+      geom_segment(aes(x = 1, xend = 2, y = y_sig, yend = y_sig), 
+                   color = "black", linewidth = 0.5) +
+      geom_segment(aes(x = 1, xend = 1, y = y_sig, yend = y_sig * 0.98), 
+                   color = "black", linewidth = 0.5) +
+      geom_segment(aes(x = 2, xend = 2, y = y_sig, yend = y_sig * 0.98), 
+                   color = "black", linewidth = 0.5) +
+      annotate("text", x = 1.5, y = y_max, label = stats$sig_label, 
+               size = 6, fontface = "bold")
+  }
+  
+  safe_name <- gsub("[^A-Za-z0-9_]", "_", display)
+  ggsave(paste0("Species_", safe_name, ".pdf"), p, width = 8, height = 6, dpi = 300)
+  ggsave(paste0("Species_", safe_name, ".png"), p, width = 8, height = 6, dpi = 300)
+}
+
+# ============================================================================
+# 10. Combined species overview
+# ============================================================================
+cat("Creating combined species overview...\n")
+
+plot_summary <- all_data %>%
+  left_join(species_stats %>% select(Species, P_value, Significance), by = "Species") %>%
+  mutate(Species_label = paste(Display_name, Significance, sep = "\n"))
+
+p_combined <- ggplot(plot_summary, aes(x = Group, y = Abundance, fill = Group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.15, size = 1, alpha = 0.5) +
+  facet_wrap(~ Species_label, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = c("Normal Aging" = "#4DBBD5", "NCD" = "#E64B35")) +
+  scale_x_discrete(limits = c("Normal Aging", "NCD")) +
+  labs(
+    title = "All Ruminococcus Species: Normal Aging vs NCD",
+    subtitle = "*** p<0.001 | ** p<0.01 | * p<0.05 | ns = not significant",
+    x = "Group",
+    y = "Relative Abundance"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold", size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+ggsave("Species_combined_overview.pdf", p_combined, width = 14, height = 10, dpi = 300)
+ggsave("Species_combined_overview.png", p_combined, width = 14, height = 10, dpi = 300)
+
+# ============================================================================
+# 11. SUMMARY REPORT
+# ============================================================================
+cat("\n\n")
+cat("╔════════════════════════════════════════════════════════════════╗\n")
+cat("║          RUMINOCOCCUS MULTI-LEVEL ANALYSIS COMPLETE           ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n\n")
+
+cat("📊 SAMPLE INFORMATION:\n")
+cat(sprintf("   Total samples: %d\n", length(sample_names)))
+cat(sprintf("   - Normal Aging: %d\n", sum(groups == "Normal Aging")))
+cat(sprintf("   - NCD: %d\n", sum(groups == "NCD")))
+
+cat("\n🦠 TAXONOMIC COVERAGE:\n")
+cat(sprintf("   Species analyzed: %d\n", length(unique(all_data$Species))))
+cat(sprintf("   - Traditional Ruminococcus genus: %d\n", 
+            sum(!unique_species_data$Reclassified)))
+cat(sprintf("   - Reclassified species: %d\n", 
+            sum(unique_species_data$Reclassified)))
+
+cat("\n📈 SIGNIFICANT FINDINGS:\n")
+cat(sprintf("   [SPECIES-level] p < 0.05: %d/%d species\n", 
+            sum(species_stats$P_value < 0.05), nrow(species_stats)))
+cat(sprintf("   [GENUS-level] p < 0.05: %d/%d genera\n", 
+            sum(genus_current_stats$P_value < 0.05), nrow(genus_current_stats)))
+cat(sprintf("   [PHYLUM-level] p < 0.05: %d/%d phyla\n", 
+            sum(phylum_stats$P_value < 0.05), nrow(phylum_stats)))
+
+cat("\n📁 OUTPUT FILES GENERATED:\n")
+cat("   CSV Statistics:\n")
+cat("   ✓ Ruminococcus_SPECIES_statistics.csv\n")
+cat("   ✓ Ruminococcus_GENUS_current_statistics.csv\n")
+cat("   ✓ Ruminococcus_GENUS_original_statistics.csv\n")
+cat("   ✓ Ruminococcus_PHYLUM_statistics.csv\n")
+cat("\n   Visualizations:\n")
+cat("   ✓ Species_*.pdf/png (individual species plots)\n")
+cat("   ✓ Species_combined_overview.pdf/png\n")
+cat("   ✓ Ruminococcus_GENUS_*.pdf/png\n")
+cat("   ✓ Ruminococcus_PHYLUM_*.pdf/png\n")
+
+cat("\n📍 Location: C:/Users/ASUS/Desktop/Gut\n")
+cat("\n════════════════════════════════════════════════════════════════\n")
+
+# Print detailed statistics
+cat("\n📋 DETAILED STATISTICS:\n\n")
+cat("SPECIES-LEVEL (Top significant):\n")
+print(species_stats %>% filter(P_value < 0.05) %>% 
+        select(Display_name, Normal_Mean, NCD_Mean, Fold_Change, P_value, Significance))
+
+cat("\n\nGENUS-LEVEL (Current classification):\n")
+print(genus_current_stats)
+
+cat("\n\nGENUS-LEVEL (Original Ruminococcus concept):\n")
+print(genus_original_stats)
+
+cat("\n\nPHYLUM-LEVEL:\n")
+print(phylum_stats)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
