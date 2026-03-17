@@ -1,0 +1,1752 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+# 单细胞测序数据结构探索
+# 用于了解数据格式，为WGCNA分析做准备
+
+# 加载必要的包
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+
+# 读取数据文件
+data_path <- "F:/projectmanfei/data.rds"
+seurat_obj <- readRDS(data_path)
+
+
+```
+```{r}
+# ============= 基本数据结构探索 =============
+cat("=== 数据对象类型 ===\n")
+cat("对象类:", class(seurat_obj), "\n")
+cat("Seurat版本:", as.character(packageVersion("Seurat")), "\n")
+cat("对象结构:\n")
+str(seurat_obj, max.level = 1)
+
+# ============= 基本维度信息 =============
+cat("\n=== 基本维度信息 ===\n")
+cat("细胞数量:", ncol(seurat_obj), "\n")
+cat("基因数量:", nrow(seurat_obj), "\n")
+cat("数据维度:", dim(seurat_obj), "\n")
+
+# ============= 检查数据槽（assays） =============
+cat("\n=== 可用的数据槽 ===\n")
+print(names(seurat_obj@assays))
+cat("默认assay:", DefaultAssay(seurat_obj), "\n")
+
+# 检查每个assay的详细信息（兼容不同版本）
+for (assay_name in names(seurat_obj@assays)) {
+  cat("\n--- Assay:", assay_name, "---\n")
+  assay_obj <- seurat_obj@assays[[assay_name]]
+  
+  # 检查是否有layers结构（Seurat v5）
+  if ("layers" %in% slotNames(assay_obj)) {
+    cat("数据存储方式: layers (Seurat v5)\n")
+    cat("可用数据层:", names(assay_obj@layers), "\n")
+    
+    if ("counts" %in% names(assay_obj@layers)) {
+      cat("counts矩阵维度:", dim(assay_obj@layers$counts), "\n")
+    }
+    if ("data" %in% names(assay_obj@layers)) {
+      cat("data矩阵维度:", dim(assay_obj@layers$data), "\n")
+    }
+    if ("scale.data" %in% names(assay_obj@layers)) {
+      cat("scale.data矩阵维度:", dim(assay_obj@layers$scale.data), "\n")
+    }
+  } else {
+    # 传统的Seurat结构（v4及以下）
+    cat("数据存储方式: 传统slots (Seurat v4或更早)\n")
+    available_slots <- c()
+    
+    # 检查counts
+    if ("counts" %in% slotNames(assay_obj) && !is.null(slot(assay_obj, "counts"))) {
+      if (nrow(slot(assay_obj, "counts")) > 0) {
+        cat("counts矩阵维度:", dim(slot(assay_obj, "counts")), "\n")
+        available_slots <- c(available_slots, "counts")
+      }
+    }
+    
+    # 检查data
+    if ("data" %in% slotNames(assay_obj) && !is.null(slot(assay_obj, "data"))) {
+      if (nrow(slot(assay_obj, "data")) > 0) {
+        cat("data矩阵维度:", dim(slot(assay_obj, "data")), "\n")
+        available_slots <- c(available_slots, "data")
+      }
+    }
+    
+    # 检查scale.data
+    if ("scale.data" %in% slotNames(assay_obj) && !is.null(slot(assay_obj, "scale.data"))) {
+      if (nrow(slot(assay_obj, "scale.data")) > 0) {
+        cat("scale.data矩阵维度:", dim(slot(assay_obj, "scale.data")), "\n")
+        available_slots <- c(available_slots, "scale.data")
+      }
+    }
+    
+    cat("可用数据层:", paste(available_slots, collapse = ", "), "\n")
+  }
+}
+
+# ============= 元数据信息 =============
+cat("\n=== 细胞元数据信息 ===\n")
+meta_data <- seurat_obj@meta.data
+cat("元数据维度:", dim(meta_data), "\n")
+cat("元数据列名:\n")
+print(colnames(meta_data))
+
+# 显示元数据的前几行
+cat("\n前5行元数据:\n")
+print(head(meta_data, 5))
+
+# 检查分类变量的水平
+cat("\n=== 分类变量统计 ===\n")
+for (col in colnames(meta_data)) {
+  if (is.character(meta_data[[col]]) || is.factor(meta_data[[col]])) {
+    unique_vals <- unique(meta_data[[col]])
+    if (length(unique_vals) <= 20) {  # 只显示少于20个水平的分类变量
+      cat(col, ":", length(unique_vals), "个水平 -", paste(unique_vals, collapse = ", "), "\n")
+    } else {
+      cat(col, ":", length(unique_vals), "个水平（过多，不显示详细）\n")
+    }
+  }
+}
+
+# ============= 降维结果 =============
+cat("\n=== 降维结果 ===\n")
+reductions <- names(seurat_obj@reductions)
+if (length(reductions) > 0) {
+  cat("可用的降维方法:", paste(reductions, collapse = ", "), "\n")
+  for (red in reductions) {
+    red_obj <- seurat_obj@reductions[[red]]
+    cat(red, "维度:", dim(red_obj@cell.embeddings), "\n")
+  }
+} else {
+  cat("未找到降维结果\n")
+}
+
+# ============= 基因信息 =============
+cat("\n=== 基因信息 ===\n")
+# 检查基因名称
+gene_names <- rownames(seurat_obj)
+cat("前10个基因名:", paste(head(gene_names, 10), collapse = ", "), "\n")
+cat("基因名类型:", ifelse(any(grepl("^ENSG", gene_names)), "Ensembl ID", "Gene Symbol"), "\n")
+
+# 检查基因表达统计（兼容不同版本）
+if ("RNA" %in% names(seurat_obj@assays)) {
+  rna_assay <- seurat_obj@assays$RNA
+  
+  # 获取标准化数据
+  rna_data <- NULL
+  if ("layers" %in% slotNames(rna_assay) && "data" %in% names(rna_assay@layers)) {
+    # Seurat v5
+    rna_data <- rna_assay@layers$data
+  } else if ("data" %in% slotNames(rna_assay)) {
+    # Seurat v4及以下
+    rna_data <- slot(rna_assay, "data")
+  }
+  
+  if (!is.null(rna_data) && nrow(rna_data) > 0) {
+    gene_means <- Matrix::rowMeans(rna_data)
+    cat("基因平均表达量统计:\n")
+    print(summary(gene_means))
+    
+    # 表达基因数统计
+    expressed_genes <- Matrix::rowSums(rna_data > 0)
+    cat("\n基因表达细胞数统计:\n")
+    print(summary(expressed_genes))
+  }
+}
+
+# ============= 质量控制指标 =============
+cat("\n=== 质量控制指标 ===\n")
+qc_metrics <- c("nCount_RNA", "nFeature_RNA", "percent.mt", "percent_mt")
+available_qc <- intersect(qc_metrics, colnames(meta_data))
+if (length(available_qc) > 0) {
+  cat("可用的QC指标:", paste(available_qc, collapse = ", "), "\n")
+  for (metric in available_qc) {
+    cat(metric, "统计:\n")
+    print(summary(meta_data[[metric]]))
+  }
+} else {
+  cat("未找到标准QC指标\n")
+}
+
+# ============= WGCNA准备检查 =============
+cat("\n=== WGCNA分析准备检查 ===\n")
+# 检查是否有标准化/缩放的数据
+if ("RNA" %in% names(seurat_obj@assays)) {
+  rna_assay <- seurat_obj@assays$RNA
+  
+  # 检查不同数据类型的可用性
+  has_counts <- FALSE
+  has_data <- FALSE
+  has_scale_data <- FALSE
+  
+  if ("layers" %in% slotNames(rna_assay)) {
+    # Seurat v5
+    has_counts <- "counts" %in% names(rna_assay@layers)
+    has_data <- "data" %in% names(rna_assay@layers)
+    has_scale_data <- "scale.data" %in% names(rna_assay@layers)
+  } else {
+    # Seurat v4及以下
+    has_counts <- "counts" %in% slotNames(rna_assay) && nrow(slot(rna_assay, "counts")) > 0
+    has_data <- "data" %in% slotNames(rna_assay) && nrow(slot(rna_assay, "data")) > 0
+    has_scale_data <- "scale.data" %in% slotNames(rna_assay) && nrow(slot(rna_assay, "scale.data")) > 0
+  }
+  
+  cat("原始counts数据:", ifelse(has_counts, "✓可用", "✗不可用"), "\n")
+  cat("标准化数据:", ifelse(has_data, "✓可用", "✗不可用"), "\n")
+  cat("缩放数据:", ifelse(has_scale_data, "✓可用", "✗不可用"), "\n")
+  
+  # 检查高变基因
+  variable_features <- NULL
+  tryCatch({
+    variable_features <- VariableFeatures(seurat_obj)
+  }, error = function(e) {
+    cat("获取高变基因时出错:", e$message, "\n")
+  })
+  
+  if (!is.null(variable_features) && length(variable_features) > 0) {
+    cat("高变基因数量:", length(variable_features), "\n")
+    cat("前10个高变基因:", paste(head(variable_features, 10), collapse = ", "), "\n")
+  } else {
+    cat("未找到高变基因\n")
+  }
+}
+
+# ============= 聚类信息 =============
+cat("\n=== 聚类信息 ===\n")
+cluster_cols <- grep("seurat_clusters|cluster|ident", colnames(meta_data), ignore.case = TRUE, value = TRUE)
+if (length(cluster_cols) > 0) {
+  cat("聚类相关列:", paste(cluster_cols, collapse = ", "), "\n")
+  for (col in cluster_cols) {
+    if (is.character(meta_data[[col]]) || is.factor(meta_data[[col]])) {
+      clusters <- unique(meta_data[[col]])
+      cat(col, ":", length(clusters), "个聚类 -", paste(head(clusters, 10), collapse = ", "), "\n")
+    }
+  }
+} else {
+  cat("未找到聚类信息\n")
+}
+
+# 检查活跃身份
+tryCatch({
+  active_ident <- Idents(seurat_obj)
+  if (!is.null(active_ident)) {
+    cat("活跃身份标识:", length(unique(active_ident)), "个类别\n")
+    cat("身份标识统计:\n")
+    print(table(active_ident))
+  }
+}, error = function(e) {
+  cat("获取活跃身份时出错:", e$message, "\n")
+})
+
+# ============= 数据提取函数 =============
+cat("\n=== 数据提取函数定义 ===\n")
+
+# 定义通用的数据提取函数
+get_expression_matrix <- function(seurat_obj, assay = "RNA", layer = "data") {
+  assay_obj <- seurat_obj@assays[[assay]]
+  
+  if ("layers" %in% slotNames(assay_obj)) {
+    # Seurat v5
+    if (layer %in% names(assay_obj@layers)) {
+      return(assay_obj@layers[[layer]])
+    }
+  } else {
+    # Seurat v4及以下
+    if (layer %in% slotNames(assay_obj)) {
+      matrix_data <- slot(assay_obj, layer)
+      if (nrow(matrix_data) > 0) {
+        return(matrix_data)
+      }
+    }
+  }
+  
+  return(NULL)
+}
+
+cat("已定义 get_expression_matrix() 函数用于提取表达矩阵\n")
+cat("使用方法: get_expression_matrix(seurat_obj, assay='RNA', layer='data')\n")
+
+# ============= 建议的下一步 =============
+cat("\n=== WGCNA分析建议 ===\n")
+cat("基于当前数据结构，建议的WGCNA分析步骤：\n")
+cat("1. 使用 get_expression_matrix() 函数提取表达矩阵\n")
+cat("2. 选择用于分析的基因（推荐使用高变基因或表达量筛选）\n")
+cat("3. 根据细胞类型或聚类信息进行分组分析\n")
+cat("4. 转置矩阵（WGCNA需要样本为行，基因为列）\n")
+cat("5. 进行软阈值选择和网络构建\n")
+cat("6. 模块检测和功能注释\n")
+
+# 保存关键信息到变量，方便后续使用
+cat("\n=== 保存关键变量 ===\n")
+cat("已创建以下变量供后续使用：\n")
+cat("- seurat_obj: Seurat对象\n")
+cat("- meta_data: 元数据\n")
+cat("- gene_names: 基因名列表\n")
+cat("- get_expression_matrix: 数据提取函数\n")
+```
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("WGCNA")
+```
+```{r}
+library(Seurat)
+library(WGCNA)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+
+# 设置工作目录和输出路径
+output_dir <- "F:/projectmanfei/WGCNA_results/"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# 设置WGCNA参数
+options(stringsAsFactors = FALSE)
+enableWGCNAThreads(nThreads = 4)  
+# ===============================================================================
+# 1. 数据准备
+# ===============================================================================
+
+cat("========== 1. 数据准备 ==========\n")
+expression_data <- GetAssayData(seurat_obj, slot = "data", assay = "RNA")
+meta_data <- seurat_obj@meta.data
+
+cat("原始数据维度:", dim(expression_data), "\n")
+cat("细胞类型数量:", length(unique(meta_data$celltype)), "\n")
+cat("样本数量:", length(unique(meta_data$sample)), "\n")
+```
+```{r}
+cat("\n========== 2. 创建Pseudobulk表达矩阵 ==========\n")
+
+# 创建细胞类型-样本组合
+meta_data$celltype_sample <- paste(meta_data$celltype, meta_data$sample, sep = "_")
+
+# 按细胞类型和样本聚合表达数据（pseudobulk）
+create_pseudobulk <- function(expression_matrix, metadata, group_col) {
+  pb_list <- list()
+  groups <- unique(metadata[[group_col]])
+  
+  for (group in groups) {
+    cells <- rownames(metadata)[metadata[[group_col]] == group]
+    cells <- intersect(cells, colnames(expression_matrix))
+    
+    if (length(cells) >= 10) {  # 至少需要10个细胞
+      # 计算该组的平均表达
+      pb_list[[group]] <- Matrix::rowMeans(expression_matrix[, cells, drop = FALSE])
+    }
+  }
+  
+  # 合并为矩阵
+  pb_matrix <- do.call(cbind, pb_list)
+  return(pb_matrix)
+}
+
+# 创建pseudobulk矩阵
+pb_matrix <- create_pseudobulk(expression_data, meta_data, "celltype_sample")
+cat("Pseudobulk矩阵维度:", dim(pb_matrix), "\n")
+
+# 过滤低表达基因
+min_expression <- 0.1  # 最小平均表达量
+min_samples <- 3       # 最少样本数
+
+gene_means <- rowMeans(pb_matrix)
+genes_expressed <- rowSums(pb_matrix > min_expression) >= min_samples
+genes_keep <- genes_expressed & (gene_means > min_expression)
+
+pb_matrix_filtered <- pb_matrix[genes_keep, ]
+cat("过滤后基因数量:", nrow(pb_matrix_filtered), "\n")
+
+# 选择高变基因进行WGCNA分析（进一步减少基因数量以提高计算效率）
+gene_variance <- apply(pb_matrix_filtered, 1, var)
+top_genes <- names(sort(gene_variance, decreasing = TRUE)[1:min(5000, length(gene_variance))])
+pb_matrix_final <- pb_matrix_filtered[top_genes, ]
+
+cat("用于WGCNA分析的基因数量:", nrow(pb_matrix_final), "\n")
+cat("用于WGCNA分析的样本数量:", ncol(pb_matrix_final), "\n")
+
+# 转置矩阵（WGCNA需要样本为行，基因为列）
+datExpr <- as.data.frame(t(pb_matrix_final))
+cat("WGCNA输入矩阵维度:", dim(datExpr), "\n")
+```
+```{r}
+cat("\n========== 3. 样本聚类和离群值检测 ==========\n")
+
+# 检查缺失值
+gsg <- goodSamplesGenes(datExpr, verbose = 3)
+
+if (!gsg$allOK) {
+  if (sum(!gsg$goodGenes) > 0) {
+    cat("移除问题基因:", sum(!gsg$goodGenes), "\n")
+  }
+  if (sum(!gsg$goodSamples) > 0) {
+    cat("移除问题样本:", sum(!gsg$goodSamples), "\n")
+  }
+  datExpr <- datExpr[gsg$goodSamples, gsg$goodGenes]
+}
+
+# 样本聚类树
+pdf(file.path(output_dir, "01_sample_clustering.pdf"), width = 12, height = 9)
+sampleTree <- hclust(dist(datExpr), method = "average")
+plot(sampleTree, main = "Sample clustering to detect outliers", 
+     sub = "", xlab = "", cex.lab = 1.5, cex.axis = 1.5, cex.main = 2)
+dev.off()
+```
+```{r}
+cat("\n========== 4. 构建样本特征矩阵 ==========\n")
+
+# 从样本名称中提取信息
+sample_info <- data.frame(
+  row.names = rownames(datExpr),
+  celltype = sapply(strsplit(rownames(datExpr), "_"), function(x) paste(x[1:(length(x)-2)], collapse="_")),
+  sample = sapply(strsplit(rownames(datExpr), "_"), function(x) x[length(x)]),
+  stringsAsFactors = FALSE
+)
+
+# 添加组信息
+sample_info$group <- ifelse(grepl("BHI", sample_info$sample), "BHI", "PEA")
+
+# 创建数值型特征矩阵（用于相关性分析）
+datTraits <- data.frame(
+  row.names = rownames(sample_info),
+  group_BHI = as.numeric(sample_info$group == "BHI"),
+  group_PEA = as.numeric(sample_info$group == "PEA")
+)
+
+# 为每个细胞类型创建二进制变量
+for (ct in unique(sample_info$celltype)) {
+  datTraits[[paste0("celltype_", gsub(" ", "_", ct))]] <- as.numeric(sample_info$celltype == ct)
+}
+
+cat("样本特征矩阵维度:", dim(datTraits), "\n")
+```
+```{r}
+cat("\n========== 5. 软阈值选择 ==========\n")
+
+# 计算软阈值
+powers <- c(1:20)
+sft <- pickSoftThreshold(datExpr, powerVector = powers, verbose = 5, 
+                        networkType = "unsigned", corFnc = "bicor")
+
+# 绘制软阈值选择图
+pdf(file.path(output_dir, "02_soft_threshold.pdf"), width = 12, height = 6)
+par(mfrow = c(1, 2))
+cex1 = 0.9
+
+# Scale-free topology fit index
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab = "Soft Threshold (power)", 
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     type = "n", main = paste("Scale independence"))
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels = powers, cex = cex1, col = "red")
+abline(h = 0.8, col = "red")
+
+# Mean connectivity
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab = "Soft Threshold (power)", ylab = "Mean Connectivity", 
+     type = "n", main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels = powers, 
+     cex = cex1, col = "red")
+dev.off()
+
+# 选择软阈值
+if (is.na(sft$powerEstimate)) {
+  softPower <- 6  # 如果无法自动选择，使用默认值
+  cat("警告：无法自动选择软阈值，使用默认值:", softPower, "\n")
+} else {
+  softPower <- sft$powerEstimate
+  cat("选择的软阈值:", softPower, "\n")
+}
+#选择的软阈值为7
+```
+```{r}
+cat("\n========== 6. 网络构建和模块识别 ==========\n")
+
+# 一步法构建网络和识别模块
+net <- blockwiseModules(
+  datExpr,
+  power = softPower,
+  TOMType = "unsigned",
+  minModuleSize = 30,
+  reassignThreshold = 0,
+  mergeCutHeight = 0.25,
+  numericLabels = TRUE,
+  pamRespectsDendro = FALSE,
+  saveTOMs = TRUE,
+  saveTOMFileBase = file.path(output_dir, "TOM"),
+  verbose = 3,
+  maxBlockSize = 10000,  # 增加块大小
+  corType = "bicor",      # 使用bicor相关性（更稳健）
+  networkType = "unsigned"
+)
+
+# 保存模块信息
+moduleLabels <- net$colors
+moduleColors <- labels2colors(net$colors)
+MEs <- net$MEs
+geneTree <- net$dendrograms[[1]]
+
+cat("识别的模块数量:", length(unique(moduleColors)) - 1, "\n")  # 减1是因为grey模块
+cat("模块大小分布:\n")
+print(table(moduleColors))
+
+# 保存模块分配
+module_assignment <- data.frame(
+  gene = colnames(datExpr),
+  module = moduleColors,
+  module_number = moduleLabels
+)
+write.csv(module_assignment, file.path(output_dir, "module_assignment.csv"), row.names = FALSE)
+```
+```{r}
+cat("\n========== 7. 模块可视化 ==========\n")
+
+# 绘制基因树和模块
+pdf(file.path(output_dir, "03_gene_dendrogram_modules.pdf"), width = 12, height = 9)
+plotDendroAndColors(geneTree,
+                   moduleColors[net$blockGenes[[1]]],
+                   "Module colors",
+                   dendroLabels = FALSE, hang = 0.03,
+                   addGuide = TRUE, guideHang = 0.05,
+                   main = "Gene dendrogram and module colors")
+dev.off()
+```
+```{r}
+cat("\n========== 8. 模块-特征关联分析 ==========\n")
+
+# 计算模块特征基因
+MEs0 <- moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs <- orderMEs(MEs0)
+
+# 计算模块与特征的相关性
+moduleTraitCor <- cor(MEs, datTraits, use = "p", method = "pearson")
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nrow(datExpr))
+
+# 绘制模块-特征关系热图
+pdf(file.path(output_dir, "04_module_trait_relationships.pdf"), width = 15, height = 10)
+textMatrix <- paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "")
+dim(textMatrix) <- dim(moduleTraitCor)
+
+par(mar = c(6, 8.5, 3, 3))
+labeledHeatmap(Matrix = moduleTraitCor,
+              xLabels = names(datTraits),
+              yLabels = names(MEs),
+              ySymbols = names(MEs),
+              colorLabels = FALSE,
+              colors = blueWhiteRed(50),
+              textMatrix = textMatrix,
+              setStdMargins = FALSE,
+              cex.text = 0.5,
+              zlim = c(-1,1),
+              main = paste("Module-trait relationships"))
+dev.off()
+```
+```{r}
+# ===============================================================================
+# 9. 基因重要性和模块成员度（修复版）
+# ===============================================================================
+
+cat("\n========== 9. 基因重要性分析 ==========\n")
+
+# 选择一个感兴趣的特征（这里选择了组别）
+trait_of_interest <- "group_BHI"
+
+# 计算基因重要性
+geneSignificance <- as.numeric(cor(datExpr, datTraits[, trait_of_interest], use = "p"))
+names(geneSignificance) <- colnames(datExpr)
+
+# 计算模块成员度
+moduleMembership <- as.data.frame(cor(datExpr, MEs, use = "p"))
+names(moduleMembership) <- paste("MM", names(MEs), sep = "")
+
+# 检查模块信息
+cat("模块数量:", length(unique(moduleColors)), "\n")
+cat("模块分布:\n")
+print(table(moduleColors))
+
+# 为每个模块找出hub基因（修复版）
+hub_genes_list <- list()
+
+for (module in unique(moduleColors)) {
+  if (module != "grey") {
+    # 获取属于该模块的基因
+    module_genes <- names(moduleColors)[moduleColors == module]
+    
+    # 检查是否有基因
+    if (length(module_genes) == 0) {
+      cat("警告：模块", module, "没有基因\n")
+      next
+    }
+    
+    cat("处理模块:", module, "，基因数量:", length(module_genes), "\n")
+    
+    # 构建模块成员度列名
+    MM_column <- paste0("MM", "ME", module)
+    
+    # 检查列是否存在
+    if (!MM_column %in% names(moduleMembership)) {
+      cat("警告：找不到模块", module, "的成员度列\n")
+      # 尝试其他可能的列名格式
+      possible_columns <- grep(paste0("ME", module, "$"), names(moduleMembership), value = TRUE)
+      if (length(possible_columns) > 0) {
+        MM_column <- possible_columns[1]
+        cat("使用替代列名:", MM_column, "\n")
+      } else {
+        next
+      }
+    }
+    
+    # 获取模块成员度
+    module_MM <- moduleMembership[module_genes, MM_column]
+    names(module_MM) <- module_genes
+    
+    # 移除NA值
+    module_MM <- module_MM[!is.na(module_MM)]
+    
+    if (length(module_MM) == 0) {
+      cat("警告：模块", module, "的所有成员度值都是NA\n")
+      next
+    }
+    
+    # 选择模块成员度最高的前10个基因作为hub基因
+    n_hub <- min(10, length(module_MM))
+    
+    if (n_hub > 0) {
+      # 按绝对值排序
+      sorted_MM <- sort(abs(module_MM), decreasing = TRUE)
+      hub_genes <- names(sorted_MM)[1:n_hub]
+      
+      # 创建hub基因数据框
+      hub_genes_df <- data.frame(
+        gene = hub_genes,
+        module = rep(module, n_hub),
+        module_membership = module_MM[hub_genes],
+        gene_significance = geneSignificance[hub_genes],
+        stringsAsFactors = FALSE
+      )
+      
+      hub_genes_list[[module]] <- hub_genes_df
+      cat("模块", module, "识别了", n_hub, "个hub基因\n")
+    }
+  }
+}
+
+# 合并所有hub基因
+if (length(hub_genes_list) > 0) {
+  hub_genes_all <- do.call(rbind, hub_genes_list)
+  rownames(hub_genes_all) <- NULL
+  
+  # 保存hub基因
+  write.csv(hub_genes_all, file.path(output_dir, "hub_genes.csv"), row.names = FALSE)
+  
+  cat("\n已成功识别hub基因，总计:", nrow(hub_genes_all), "个\n")
+  
+  # 显示每个模块的top hub基因
+  cat("\n每个模块的顶级hub基因:\n")
+  for (module in names(hub_genes_list)) {
+    top_hub <- hub_genes_list[[module]]$gene[1]
+    cat("模块", module, ":", top_hub, "\n")
+  }
+  
+} else {
+  cat("警告：没有识别到任何hub基因\n")
+  hub_genes_all <- data.frame()
+}
+
+# ===============================================================================
+# 9b. 可视化基因重要性和模块成员度关系
+# ===============================================================================
+
+cat("\n========== 9b. 可视化GS-MM关系 ==========\n")
+
+# 选择显著相关的模块进行可视化
+significant_modules <- rownames(moduleTraitCor)[abs(moduleTraitCor[, trait_of_interest]) > 0.3 & 
+                                                moduleTraitPvalue[, trait_of_interest] < 0.05]
+
+if (length(significant_modules) > 0) {
+  # 创建多面板图
+  n_modules <- min(6, length(significant_modules))  # 最多显示6个模块
+  
+  pdf(file.path(output_dir, "05_GS_MM_plots.pdf"), width = 12, height = 8)
+  par(mfrow = c(2, 3))
+  
+  for (i in 1:n_modules) {
+    module_name <- significant_modules[i]
+    module_color <- gsub("ME", "", module_name)
+    
+    if (module_color %in% unique(moduleColors)) {
+      # 获取模块基因
+      inModule <- moduleColors == module_color
+      
+      # 获取MM和GS值
+      MM_col <- paste0("MM", module_name)
+      if (MM_col %in% names(moduleMembership)) {
+        module_MM <- moduleMembership[inModule, MM_col]
+        module_GS <- geneSignificance[inModule]
+        
+        # 移除NA值
+        valid_idx <- !is.na(module_MM) & !is.na(module_GS)
+        module_MM <- module_MM[valid_idx]
+        module_GS <- module_GS[valid_idx]
+        
+        if (length(module_MM) > 2) {
+          # 计算相关性
+          cor_value <- cor(abs(module_MM), abs(module_GS), use = "p")
+          
+          # 绘制散点图
+          plot(abs(module_MM), abs(module_GS),
+               xlab = paste("Module Membership in", module_color, "module"),
+               ylab = paste("Gene significance for", trait_of_interest),
+               main = paste("Module", module_color, "\ncor =", round(cor_value, 2)),
+               cex.main = 1,
+               cex.lab = 1,
+               cex.axis = 1,
+               col = module_color,
+               pch = 19)
+          
+          # 添加趋势线
+          abline(lm(abs(module_GS) ~ abs(module_MM)), col = "red", lwd = 2)
+        }
+      }
+    }
+  }
+  
+  dev.off()
+  cat("已创建GS-MM关系图\n")
+}
+
+# ===============================================================================
+# 9c. 创建hub基因热图
+# ===============================================================================
+
+cat("\n========== 9c. Hub基因表达热图 ==========\n")
+
+if (nrow(hub_genes_all) > 0) {
+  # 选择每个模块的top 3 hub基因进行可视化
+  top_hubs <- list()
+  for (module in unique(hub_genes_all$module)) {
+    module_hubs <- hub_genes_all[hub_genes_all$module == module, ]
+    top_hubs[[module]] <- head(module_hubs$gene, 3)
+  }
+  
+  all_top_hubs <- unlist(top_hubs)
+  
+  if (length(all_top_hubs) > 0 && length(all_top_hubs) <= 100) {
+    # 准备热图数据
+    hub_expr <- t(datExpr[, all_top_hubs, drop = FALSE])
+    
+    # 标准化表达值（z-score）
+    hub_expr_scaled <- t(scale(t(hub_expr)))
+    
+    # 准备注释
+    hub_annotation <- data.frame(
+      Module = hub_genes_all$module[match(all_top_hubs, hub_genes_all$gene)],
+      row.names = all_top_hubs
+    )
+    
+    sample_annotation <- data.frame(
+      Group = sample_info$group,
+      CellType = sample_info$celltype,
+      row.names = rownames(datExpr)
+    )
+    
+    # 设置颜色
+    module_colors_unique <- unique(hub_annotation$Module)
+    module_color_map <- setNames(module_colors_unique, module_colors_unique)
+    
+    ann_colors <- list(
+      Module = module_color_map,
+      Group = c(BHI = "lightblue", PEA = "lightpink"),
+      CellType = setNames(rainbow(length(unique(sample_info$celltype))), 
+                          unique(sample_info$celltype))
+    )
+    
+    # 绘制热图
+    library(pheatmap)
+    pdf(file.path(output_dir, "06_hub_genes_heatmap.pdf"), width = 14, height = 10)
+    pheatmap(hub_expr_scaled,
+            annotation_row = hub_annotation,
+            annotation_col = sample_annotation,
+            annotation_colors = ann_colors,
+            cluster_rows = TRUE,
+            cluster_cols = TRUE,
+            show_rownames = TRUE,
+            show_colnames = FALSE,
+            fontsize_row = 6,
+            main = "Hub Genes Expression Heatmap",
+            color = colorRampPalette(c("blue", "white", "red"))(100),
+            breaks = seq(-3, 3, length.out = 101))
+    dev.off()
+    
+    cat("已创建hub基因表达热图\n")
+  }
+}
+
+cat("\n基因重要性分析完成！\n")
+
+
+```
+```{r}
+cat("\n========== 10. 准备功能富集分析 ==========\n")
+
+# 为每个模块保存基因列表
+for (module in unique(moduleColors)) {
+  if (module != "grey") {
+    module_genes <- names(moduleColors)[moduleColors == module]
+    write.table(module_genes, 
+               file = file.path(output_dir, paste0("module_", module, "_genes.txt")),
+               quote = FALSE, row.names = FALSE, col.names = FALSE)
+  }
+}
+
+cat("已保存每个模块的基因列表，可用于GO/KEGG富集分析\n")
+```
+```{r}
+cat("\n========== 11. 准备网络可视化数据 ==========\n")
+
+# 选择感兴趣的模块进行详细分析
+modules_of_interest <- names(sort(table(moduleColors), decreasing = TRUE)[2:4])  # 选择最大的3个模块（除了grey）
+
+for (module in modules_of_interest) {
+  # 选择模块内的基因
+  inModule <- moduleColors == module
+  modGenes <- colnames(datExpr)[inModule]
+  
+  if (length(modGenes) > 2) {
+    # 计算模块内的TOM
+    modTOM <- TOMsimilarityFromExpr(datExpr[, modGenes],
+                                    power = softPower,
+                                    networkType = "unsigned",
+                                    TOMType = "unsigned")
+    
+    # 导出网络用于Cytoscape
+    cyt <- exportNetworkToCytoscape(modTOM,
+                                   edgeFile = file.path(output_dir, 
+                                                       paste0("CytoscapeInput-edges-", module, ".txt")),
+                                   nodeFile = file.path(output_dir,
+                                                       paste0("CytoscapeInput-nodes-", module, ".txt")),
+                                   weighted = TRUE,
+                                   threshold = 0.1,
+                                   nodeNames = modGenes,
+                                   nodeAttr = moduleColors[inModule])
+    
+    cat("已导出", module, "模块的Cytoscape文件\n")
+  }
+}
+```
+```{r}
+cat("\n========== 12. 保存结果 ==========\n")
+
+# 保存WGCNA结果对象
+wgcna_results <- list(
+  expression_matrix = datExpr,
+  module_colors = moduleColors,
+  module_eigengenes = MEs,
+  module_trait_cor = moduleTraitCor,
+  module_trait_pvalue = moduleTraitPvalue,
+  soft_threshold = softPower,
+  sample_info = sample_info,
+  traits = datTraits,
+  hub_genes = hub_genes_all,
+  network = net
+)
+
+saveRDS(wgcna_results, file.path(output_dir, "wgcna_results.rds"))
+
+# 创建结果摘要
+summary_report <- list(
+  n_samples = nrow(datExpr),
+  n_genes = ncol(datExpr),
+  n_modules = length(unique(moduleColors)) - 1,
+  soft_threshold = softPower,
+  module_sizes = table(moduleColors),
+  significant_correlations = sum(moduleTraitPvalue < 0.05),
+  analysis_date = Sys.Date()
+)
+
+# 保存摘要报告
+sink(file.path(output_dir, "analysis_summary.txt"))
+cat("========== WGCNA分析摘要 ==========\n\n")
+cat("分析日期:", as.character(summary_report$analysis_date), "\n")
+cat("样本数量:", summary_report$n_samples, "\n")
+cat("基因数量:", summary_report$n_genes, "\n")
+cat("模块数量:", summary_report$n_modules, "\n")
+cat("软阈值:", summary_report$soft_threshold, "\n")
+cat("\n模块大小分布:\n")
+print(summary_report$module_sizes)
+cat("\n显著相关的模块-特征对数量:", summary_report$significant_correlations, "\n")
+sink()
+
+# 保存会话信息
+sink(file.path(output_dir, "session_info.txt"))
+sessionInfo()
+sink()
+
+cat("\n========== 分析完成 ==========\n")
+cat("所有结果已保存到:", output_dir, "\n")
+cat("\n主要输出文件:\n")
+cat("1. wgcna_results.rds - 完整的WGCNA结果对象\n")
+cat("2. module_assignment.csv - 基因-模块分配表\n")
+cat("3. hub_genes.csv - 每个模块的hub基因\n")
+cat("4. 各种可视化图表（PDF格式）\n")
+cat("5. Cytoscape网络文件\n")
+cat("6. 各模块基因列表（用于富集分析）\n")
+```
+```{r}
+cat("\n========== 13. 细胞类型特异性模块分析 ==========\n")
+
+# 找出与特定细胞类型高度相关的模块
+celltype_specific_modules <- list()
+celltype_cols <- grep("^celltype_", names(datTraits), value = TRUE)
+
+for (ct_col in celltype_cols) {
+  ct_name <- gsub("celltype_", "", ct_col)
+  
+  # 找出与该细胞类型显著相关的模块
+  sig_modules <- names(MEs)[moduleTraitPvalue[, ct_col] < 0.05 & abs(moduleTraitCor[, ct_col]) > 0.5]
+  
+  if (length(sig_modules) > 0) {
+    celltype_specific_modules[[ct_name]] <- data.frame(
+      celltype = ct_name,
+      module = gsub("ME", "", sig_modules),
+      correlation = moduleTraitCor[sig_modules, ct_col],
+      pvalue = moduleTraitPvalue[sig_modules, ct_col]
+    )
+  }
+}
+
+# 保存细胞类型特异性模块
+if (length(celltype_specific_modules) > 0) {
+  celltype_modules_df <- do.call(rbind, celltype_specific_modules)
+  write.csv(celltype_modules_df, 
+           file.path(output_dir, "celltype_specific_modules.csv"), 
+           row.names = FALSE)
+  cat("已识别细胞类型特异性模块\n")
+}
+
+cat("\n分析全部完成！\n")
+```
+```{r}
+# ===============================================================================
+# 13. 相关性网络热图
+# ===============================================================================
+
+cat("\n========== 13. 相关性网络热图 ==========\n")
+
+library(igraph)
+library(networkD3)
+library(corrplot)
+library(ComplexHeatmap)
+library(circlize)
+
+# 计算模块间相关性
+module_cor <- cor(MEs, use = "pairwise.complete.obs")
+module_cor_pval <- corPvalueStudent(module_cor, nSamples = nrow(datExpr))
+
+# 创建相关性网络数据
+create_correlation_network <- function(cor_matrix, pval_matrix, threshold = 0.3, pval_threshold = 0.05) {
+  # 只保留显著相关且达到阈值的连接
+  sig_matrix <- (abs(cor_matrix) > threshold) & (pval_matrix < pval_threshold)
+  
+  # 创建边列表
+  edges <- which(sig_matrix & upper.tri(sig_matrix), arr.ind = TRUE)
+  if (nrow(edges) > 0) {
+    edge_list <- data.frame(
+      from = rownames(cor_matrix)[edges[,1]],
+      to = colnames(cor_matrix)[edges[,2]],
+      weight = cor_matrix[edges],
+      abs_weight = abs(cor_matrix[edges])
+    )
+    return(edge_list)
+  } else {
+    return(data.frame())
+  }
+}
+
+edge_list <- create_correlation_network(module_cor, module_cor_pval, threshold = 0.3)
+
+# 创建网络图和热图的组合可视化
+pdf(file.path(output_dir, "07_correlation_network_heatmap.pdf"), width = 16, height = 10)
+
+# 设置布局
+layout(matrix(c(1, 2), nrow = 1, ncol = 2), widths = c(1, 1))
+
+# 左侧：相关性网络图
+if (nrow(edge_list) > 0) {
+  # 创建igraph对象
+  g <- graph_from_data_frame(edge_list, directed = FALSE)
+  
+  # 设置节点属性
+  module_names <- gsub("ME", "", V(g)$name)
+  V(g)$color <- module_names
+  V(g)$size <- 8
+  V(g)$label.cex <- 0.7
+  
+  # 设置边属性
+  E(g)$width <- abs(E(g)$weight) * 5
+  E(g)$color <- ifelse(E(g)$weight > 0, "red", "blue")
+  
+  # 为布局算法设置正权重
+  E(g)$weight_positive <- abs(E(g)$weight)
+  
+  # 绘制网络
+  set.seed(123)
+  plot(g, 
+       layout = layout_with_fr(g, weights = E(g)$weight_positive),
+       vertex.label.color = "black",
+       vertex.frame.color = "white",
+       main = "Module Correlation Network",
+       sub = paste("Threshold:", 0.3, "| Edges:", ecount(g)))
+  
+  # 添加图例
+  legend("bottomright", 
+         legend = c("Positive", "Negative"), 
+         col = c("red", "blue"), 
+         lty = 1, lwd = 2, cex = 0.7)
+} else {
+  plot.new()
+  text(0.5, 0.5, "No significant correlations found", cex = 1.5)
+}
+
+# 右侧：相关性热图
+corrplot(module_cor, 
+         method = "color",
+         type = "full",
+         order = "hclust",
+         tl.cex = 0.7,
+         tl.col = "black",
+         tl.srt = 45,
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         title = "Module Correlation Heatmap",
+         mar = c(0,0,2,0),
+         addCoef.col = "black",
+         number.cex = 0.5)
+
+dev.off()
+
+# 使用ComplexHeatmap创建更详细的热图
+pdf(file.path(output_dir, "08_detailed_correlation_heatmap.pdf"), width = 12, height = 10)
+
+# 准备注释
+module_names <- gsub("ME", "", rownames(module_cor))
+module_annotation <- data.frame(
+  Module = module_names,
+  Size = as.numeric(table(moduleColors)[module_names])
+)
+rownames(module_annotation) <- rownames(module_cor)
+
+# 创建颜色映射
+col_fun <- colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+
+# 绘制复杂热图
+Heatmap(module_cor,
+        name = "Correlation",
+        col = col_fun,
+        show_row_names = TRUE,
+        show_column_names = TRUE,
+        row_names_gp = gpar(fontsize = 8),
+        column_names_gp = gpar(fontsize = 8),
+        heatmap_legend_param = list(title = "Correlation"),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          if(abs(module_cor[i, j]) > 0.3 && module_cor_pval[i, j] < 0.05) {
+            grid.text(sprintf("%.2f", module_cor[i, j]), x, y, 
+                     gp = gpar(fontsize = 8, col = "black"))
+          }
+        })
+
+dev.off()
+
+cat("相关性网络热图已创建完成\n")
+```
+```{r}
+cat("\n========== 14. 细胞类型特异性分析 ==========\n")
+
+# 定义要分析的细胞类型
+target_celltypes <- c("Fibroblasts", "Mast_cells", "Transient_Amplifying_Cells", "Dendritic_Cells")
+
+# 检查这些细胞类型在数据中的存在情况
+available_celltypes <- unique(meta_data$celltype)
+cat("可用的细胞类型:", paste(available_celltypes, collapse = ", "), "\n")
+
+# 匹配目标细胞类型
+matched_celltypes <- target_celltypes[target_celltypes %in% available_celltypes]
+cat("匹配的目标细胞类型:", paste(matched_celltypes, collapse = ", "), "\n")
+
+# 如果没有完全匹配，尝试模糊匹配
+if (length(matched_celltypes) < length(target_celltypes)) {
+  for (target in target_celltypes[!target_celltypes %in% matched_celltypes]) {
+    fuzzy_matches <- grep(target, available_celltypes, ignore.case = TRUE, value = TRUE)
+    if (length(fuzzy_matches) > 0) {
+      matched_celltypes <- c(matched_celltypes, fuzzy_matches[1])
+      cat("模糊匹配:", target, "->", fuzzy_matches[1], "\n")
+    }
+  }
+}
+
+# ===============================================================================
+# 15. 单独分析每个细胞类型
+# ===============================================================================
+
+celltype_results <- list()
+
+for (celltype in matched_celltypes) {
+  cat("\n========== 分析细胞类型:", celltype, "==========\n")
+  
+  # 提取该细胞类型的样本
+  celltype_samples <- rownames(sample_info)[sample_info$celltype == celltype]
+  
+  if (length(celltype_samples) < 3) {
+    cat("警告：细胞类型", celltype, "的样本数量太少，跳过分析\n")
+    next
+  }
+  
+  cat("样本数量:", length(celltype_samples), "\n")
+  
+  # 提取该细胞类型的表达数据
+  celltype_expr <- datExpr[celltype_samples, ]
+  celltype_traits <- datTraits[celltype_samples, ]
+  
+  # 过滤表达量过低的基因
+  gene_means <- colMeans(celltype_expr)
+  genes_keep <- gene_means > quantile(gene_means, 0.1)  # 保留前90%的基因
+  
+  celltype_expr_filtered <- celltype_expr[, genes_keep]
+  cat("过滤后基因数量:", ncol(celltype_expr_filtered), "\n")
+  
+  # 重新计算软阈值
+  powers <- c(1:20)
+  sft_celltype <- pickSoftThreshold(celltype_expr_filtered, 
+                                   powerVector = powers, 
+                                   verbose = 0,
+                                   networkType = "unsigned")
+  
+  if (is.na(sft_celltype$powerEstimate)) {
+    softPower_celltype <- 6
+  } else {
+    softPower_celltype <- sft_celltype$powerEstimate
+  }
+  
+  cat("选择的软阈值:", softPower_celltype, "\n")
+  
+  # 构建网络
+  net_celltype <- blockwiseModules(
+    celltype_expr_filtered,
+    power = softPower_celltype,
+    TOMType = "unsigned",
+    minModuleSize = 20,  # 减小最小模块大小
+    reassignThreshold = 0,
+    mergeCutHeight = 0.25,
+    numericLabels = TRUE,
+    pamRespectsDendro = FALSE,
+    saveTOMs = FALSE,
+    verbose = 1,
+    maxBlockSize = 5000,
+    networkType = "unsigned"
+  )
+  
+  # 模块信息
+  moduleColors_celltype <- labels2colors(net_celltype$colors)
+  MEs_celltype <- net_celltype$MEs
+  
+  cat("识别的模块数量:", length(unique(moduleColors_celltype)) - 1, "\n")
+  
+  # 计算模块与组别的相关性
+  if ("group_BHI" %in% colnames(celltype_traits)) {
+    moduleTraitCor_celltype <- cor(MEs_celltype, celltype_traits, use = "p")
+    moduleTraitPvalue_celltype <- corPvalueStudent(moduleTraitCor_celltype, nrow(celltype_expr_filtered))
+    
+    # 找出显著相关的模块
+    sig_modules_celltype <- rownames(moduleTraitCor_celltype)[
+      abs(moduleTraitCor_celltype[, "group_BHI"]) > 0.5 & 
+      moduleTraitPvalue_celltype[, "group_BHI"] < 0.05
+    ]
+    
+    cat("与组别显著相关的模块:", length(sig_modules_celltype), "个\n")
+  }
+  
+  # 保存结果
+  celltype_results[[celltype]] <- list(
+    expression_data = celltype_expr_filtered,
+    module_colors = moduleColors_celltype,
+    module_eigengenes = MEs_celltype,
+    soft_threshold = softPower_celltype,
+    network = net_celltype,
+    samples = celltype_samples,
+    traits = celltype_traits
+  )
+  
+  if (exists("moduleTraitCor_celltype")) {
+    celltype_results[[celltype]]$module_trait_cor <- moduleTraitCor_celltype
+    celltype_results[[celltype]]$module_trait_pvalue <- moduleTraitPvalue_celltype
+  }
+  
+  # 绘制基因树和模块
+  pdf(file.path(output_dir, paste0("09_", gsub("[^A-Za-z0-9]", "_", celltype), "_dendrogram.pdf")), 
+      width = 12, height = 6)
+  plotDendroAndColors(net_celltype$dendrograms[[1]],
+                     moduleColors_celltype[net_celltype$blockGenes[[1]]],
+                     paste(celltype, "Module colors"),
+                     dendroLabels = FALSE, hang = 0.03,
+                     addGuide = TRUE, guideHang = 0.05)
+  dev.off()
+  
+  # 绘制模块-特征关系热图（如果有特征数据）
+  if (exists("moduleTraitCor_celltype") && ncol(celltype_traits) > 0) {
+    pdf(file.path(output_dir, paste0("10_", gsub("[^A-Za-z0-9]", "_", celltype), "_module_trait.pdf")), 
+        width = 10, height = 8)
+    
+    textMatrix <- paste(signif(moduleTraitCor_celltype, 2), "\n(",
+                       signif(moduleTraitPvalue_celltype, 1), ")", sep = "")
+    dim(textMatrix) <- dim(moduleTraitCor_celltype)
+    
+    par(mar = c(6, 8.5, 3, 3))
+    labeledHeatmap(Matrix = moduleTraitCor_celltype,
+                  xLabels = names(celltype_traits),
+                  yLabels = names(MEs_celltype),
+                  ySymbols = names(MEs_celltype),
+                  colorLabels = FALSE,
+                  colors = blueWhiteRed(50),
+                  textMatrix = textMatrix,
+                  setStdMargins = FALSE,
+                  cex.text = 0.6,
+                  zlim = c(-1,1),
+                  main = paste(celltype, "Module-trait relationships"))
+    dev.off()
+  }
+  
+  # 保存模块基因列表
+  module_assignment_celltype <- data.frame(
+    gene = colnames(celltype_expr_filtered),
+    module = moduleColors_celltype,
+    stringsAsFactors = FALSE
+  )
+  
+  write.csv(module_assignment_celltype, 
+           file.path(output_dir, paste0(gsub("[^A-Za-z0-9]", "_", celltype), "_module_assignment.csv")), 
+           row.names = FALSE)
+}
+
+# ===============================================================================
+# 16. 合并分析后三个细胞类型
+# ===============================================================================
+
+cat("\n========== 16. 合并分析后三个细胞类型 ==========\n")
+
+# 合并后三个细胞类型
+combined_celltypes <- matched_celltypes[matched_celltypes != "Fibroblasts"]
+if (length(combined_celltypes) >= 2) {
+  cat("合并分析的细胞类型:", paste(combined_celltypes, collapse = ", "), "\n")
+  
+  # 提取合并细胞类型的样本
+  combined_samples <- rownames(sample_info)[sample_info$celltype %in% combined_celltypes]
+  cat("合并样本数量:", length(combined_samples), "\n")
+  
+  if (length(combined_samples) >= 5) {
+    # 提取表达数据
+    combined_expr <- datExpr[combined_samples, ]
+    combined_traits <- datTraits[combined_samples, ]
+    
+    # 添加细胞类型标签
+    combined_celltype_info <- sample_info[combined_samples, ]
+    for (ct in combined_celltypes) {
+      combined_traits[[paste0("is_", gsub("[^A-Za-z0-9]", "_", ct))]] <- 
+        as.numeric(combined_celltype_info$celltype == ct)
+    }
+    
+    # 过滤基因
+    gene_means <- colMeans(combined_expr)
+    genes_keep <- gene_means > quantile(gene_means, 0.1)
+    combined_expr_filtered <- combined_expr[, genes_keep]
+    
+    cat("过滤后基因数量:", ncol(combined_expr_filtered), "\n")
+    
+    # 计算软阈值
+    sft_combined <- pickSoftThreshold(combined_expr_filtered, 
+                                     powerVector = c(1:20), 
+                                     verbose = 0,
+                                     networkType = "unsigned")
+    
+    softPower_combined <- ifelse(is.na(sft_combined$powerEstimate), 6, sft_combined$powerEstimate)
+    cat("选择的软阈值:", softPower_combined, "\n")
+    
+    # 构建网络
+    net_combined <- blockwiseModules(
+      combined_expr_filtered,
+      power = softPower_combined,
+      TOMType = "unsigned",
+      minModuleSize = 20,
+      reassignThreshold = 0,
+      mergeCutHeight = 0.25,
+      numericLabels = TRUE,
+      pamRespectsDendro = FALSE,
+      saveTOMs = FALSE,
+      verbose = 1,
+      maxBlockSize = 5000,
+      networkType = "unsigned"
+    )
+    
+    # 模块信息
+    moduleColors_combined <- labels2colors(net_combined$colors)
+    MEs_combined <- net_combined$MEs
+    
+    cat("识别的模块数量:", length(unique(moduleColors_combined)) - 1, "\n")
+    
+    # 计算模块-特征相关性
+    moduleTraitCor_combined <- cor(MEs_combined, combined_traits, use = "p")
+    moduleTraitPvalue_combined <- corPvalueStudent(moduleTraitCor_combined, nrow(combined_expr_filtered))
+    
+    # 绘制基因树
+    pdf(file.path(output_dir, "11_combined_celltypes_dendrogram.pdf"), width = 12, height = 6)
+    plotDendroAndColors(net_combined$dendrograms[[1]],
+                       moduleColors_combined[net_combined$blockGenes[[1]]],
+                       "Combined Cell Types Module colors",
+                       dendroLabels = FALSE, hang = 0.03,
+                       addGuide = TRUE, guideHang = 0.05)
+    dev.off()
+    
+    # 绘制模块-特征关系热图
+    pdf(file.path(output_dir, "12_combined_celltypes_module_trait.pdf"), width = 14, height = 10)
+    
+    textMatrix <- paste(signif(moduleTraitCor_combined, 2), "\n(",
+                       signif(moduleTraitPvalue_combined, 1), ")", sep = "")
+    dim(textMatrix) <- dim(moduleTraitCor_combined)
+    
+    par(mar = c(8, 10, 3, 3))
+    labeledHeatmap(Matrix = moduleTraitCor_combined,
+                  xLabels = names(combined_traits),
+                  yLabels = names(MEs_combined),
+                  ySymbols = names(MEs_combined),
+                  colorLabels = FALSE,
+                  colors = blueWhiteRed(50),
+                  textMatrix = textMatrix,
+                  setStdMargins = FALSE,
+                  cex.text = 0.5,
+                  zlim = c(-1,1),
+                  main = "Combined Cell Types Module-trait relationships")
+    dev.off()
+    
+    # 保存合并分析结果
+    combined_results <- list(
+      expression_data = combined_expr_filtered,
+      module_colors = moduleColors_combined,
+      module_eigengenes = MEs_combined,
+      module_trait_cor = moduleTraitCor_combined,
+      module_trait_pvalue = moduleTraitPvalue_combined,
+      soft_threshold = softPower_combined,
+      network = net_combined,
+      cell_types = combined_celltypes,
+      samples = combined_samples,
+      traits = combined_traits
+    )
+    
+    saveRDS(combined_results, file.path(output_dir, "combined_celltypes_wgcna_results.rds"))
+    
+    # 保存模块分配
+    combined_module_assignment <- data.frame(
+      gene = colnames(combined_expr_filtered),
+      module = moduleColors_combined,
+      stringsAsFactors = FALSE
+    )
+    
+    write.csv(combined_module_assignment, 
+             file.path(output_dir, "combined_celltypes_module_assignment.csv"), 
+             row.names = FALSE)
+    
+    cat("合并细胞类型分析完成\n")
+  } else {
+    cat("合并样本数量不足，跳过分析\n")
+  }
+} else {
+  cat("可用于合并分析的细胞类型不足\n")
+}
+
+# ===============================================================================
+# 17. 保存所有细胞类型特异性结果
+# ===============================================================================
+
+cat("\n========== 17. 保存细胞类型特异性结果 ==========\n")
+
+# 保存所有细胞类型的结果
+saveRDS(celltype_results, file.path(output_dir, "celltype_specific_wgcna_results.rds"))
+
+# 创建细胞类型分析摘要
+celltype_summary <- data.frame(
+  celltype = names(celltype_results),
+  n_samples = sapply(celltype_results, function(x) length(x$samples)),
+  n_genes = sapply(celltype_results, function(x) ncol(x$expression_data)),
+  n_modules = sapply(celltype_results, function(x) length(unique(x$module_colors)) - 1),
+  soft_threshold = sapply(celltype_results, function(x) x$soft_threshold),
+  stringsAsFactors = FALSE
+)
+
+write.csv(celltype_summary, file.path(output_dir, "celltype_analysis_summary.csv"), row.names = FALSE)
+
+# 创建最终报告
+sink(file.path(output_dir, "final_analysis_report.txt"))
+cat("========== WGCNA细胞类型特异性分析完整报告 ==========\n\n")
+cat("分析完成时间:", as.character(Sys.time()), "\n\n")
+
+cat("=== 总体分析 ===\n")
+cat("总样本数:", nrow(datExpr), "\n")
+cat("总基因数:", ncol(datExpr), "\n")
+cat("总模块数:", length(unique(moduleColors)) - 1, "\n")
+
+cat("\n=== 细胞类型特异性分析 ===\n")
+if (nrow(celltype_summary) > 0) {
+  print(celltype_summary)
+} else {
+  cat("未完成任何细胞类型特异性分析\n")
+}
+
+if (exists("combined_results")) {
+  cat("\n=== 合并细胞类型分析 ===\n")
+  cat("合并的细胞类型:", paste(combined_celltypes, collapse = ", "), "\n")
+  cat("合并样本数:", length(combined_results$samples), "\n")
+  cat("合并分析基因数:", ncol(combined_results$expression_data), "\n")
+  cat("合并分析模块数:", length(unique(combined_results$module_colors)) - 1, "\n")
+}
+
+cat("\n=== 输出文件列表 ===\n")
+output_files <- list.files(output_dir, full.names = FALSE)
+for (file in output_files) {
+  cat("-", file, "\n")
+}
+
+sink()
+
+cat("\n========== 全部分析完成 ==========\n")
+cat("详细结果请查看:", output_dir, "\n")
+```
+```{r}
+# ===============================================================================
+# 17. 为每个细胞类型创建相关性网络和热图组合
+# ===============================================================================
+
+cat("\n========== 17. 细胞类型特异性相关性网络热图 ==========\n")
+
+# 为每个分析过的细胞类型创建相关性网络热图
+for (celltype in names(celltype_results)) {
+  cat("\n--- 创建", celltype, "的相关性网络热图 ---\n")
+  
+  # 获取该细胞类型的结果
+  ct_result <- celltype_results[[celltype]]
+  
+  # 检查是否有足够的模块进行相关性分析
+  if (is.null(ct_result$module_eigengenes) || ncol(ct_result$module_eigengenes) < 2) {
+    cat("警告：", celltype, "的模块数量不足，跳过相关性分析\n")
+    next
+  }
+  
+  # 计算该细胞类型模块间相关性
+  MEs_ct <- ct_result$module_eigengenes
+  module_cor_ct <- cor(MEs_ct, use = "pairwise.complete.obs")
+  module_cor_pval_ct <- corPvalueStudent(module_cor_ct, nSamples = nrow(ct_result$expression_data))
+  
+  # 创建相关性网络数据
+  edge_list_ct <- create_correlation_network(module_cor_ct, module_cor_pval_ct, threshold = 0.3)
+  
+  # 创建网络图和热图的组合可视化
+  pdf(file.path(output_dir, paste0("13_", gsub("[^A-Za-z0-9]", "_", celltype), "_correlation_network_heatmap.pdf")), 
+      width = 16, height = 10)
+  
+  # 设置布局
+  layout(matrix(c(1, 2), nrow = 1, ncol = 2), widths = c(1, 1))
+  
+  # 左侧：相关性网络图
+  if (nrow(edge_list_ct) > 0) {
+    # 创建igraph对象
+    g_ct <- graph_from_data_frame(edge_list_ct, directed = FALSE)
+    
+    # 设置节点属性
+    module_names_ct <- gsub("ME", "", V(g_ct)$name)
+    V(g_ct)$color <- module_names_ct
+    V(g_ct)$size <- 10
+    V(g_ct)$label.cex <- 0.8
+    V(g_ct)$label.color <- "black"
+    
+    # 设置边属性
+    E(g_ct)$width <- abs(E(g_ct)$weight) * 6
+    E(g_ct)$color <- ifelse(E(g_ct)$weight > 0, "red", "blue")
+    
+    # 为布局算法设置正权重
+    E(g_ct)$weight_positive <- abs(E(g_ct)$weight)
+    
+    # 绘制网络
+    set.seed(123)
+    plot(g_ct, 
+         layout = layout_with_fr(g_ct, weights = E(g_ct)$weight_positive),
+         vertex.label.color = "black",
+         vertex.frame.color = "white",
+         main = paste(celltype, "Module Correlation Network"),
+         sub = paste("Threshold: 0.3 | Modules:", vcount(g_ct), "| Edges:", ecount(g_ct)),
+         cex.main = 1.2)
+    
+    # 添加图例
+    legend("bottomright", 
+           legend = c("Positive Correlation", "Negative Correlation"), 
+           col = c("red", "blue"), 
+           lty = 1, lwd = 3, cex = 0.8,
+           title = "Edge Color")
+    
+  } else {
+    # 如果没有显著相关性，显示所有模块但不连边
+    plot.new()
+    plot.window(xlim = c(-1, 1), ylim = c(-1, 1))
+    
+    # 创建简单的模块布局
+    n_modules <- ncol(MEs_ct)
+    if (n_modules > 1) {
+      angles <- seq(0, 2*pi, length.out = n_modules + 1)[1:n_modules]
+      x_pos <- 0.6 * cos(angles)
+      y_pos <- 0.6 * sin(angles)
+      
+      module_names_simple <- gsub("ME", "", colnames(MEs_ct))
+      points(x_pos, y_pos, col = module_names_simple, pch = 19, cex = 3)
+      text(x_pos, y_pos, labels = module_names_simple, cex = 0.7, col = "white", font = 2)
+    }
+    
+    title(main = paste(celltype, "Module Network"), 
+          sub = "No significant correlations found (threshold: 0.3)",
+          cex.main = 1.2)
+  }
+  
+  # 右侧：相关性热图
+  if (ncol(module_cor_ct) >= 2) {
+    # 使用corrplot创建热图
+    corrplot(module_cor_ct, 
+             method = "color",
+             type = "full",
+             order = "hclust",
+             tl.cex = 0.8,
+             tl.col = "black",
+             tl.srt = 45,
+             col = colorRampPalette(c("blue", "white", "red"))(200),
+             title = paste(celltype, "Module Correlation"),
+             mar = c(0,0,3,0),
+             addCoef.col = "black",
+             number.cex = 0.6,
+             cl.cex = 0.8)
+  } else {
+    plot.new()
+    text(0.5, 0.5, paste("Insufficient modules for", celltype), cex = 1.5)
+  }
+  
+  dev.off()
+  
+  # 创建详细的ComplexHeatmap版本
+  if (ncol(module_cor_ct) >= 2) {
+    pdf(file.path(output_dir, paste0("14_", gsub("[^A-Za-z0-9]", "_", celltype), "_detailed_correlation_heatmap.pdf")), 
+        width = 10, height = 8)
+    
+    # 准备注释
+    module_names_detailed <- gsub("ME", "", colnames(module_cor_ct))
+    module_sizes <- table(ct_result$module_colors)[module_names_detailed]
+    module_annotation_ct <- data.frame(
+      Module = module_names_detailed,
+      Size = as.numeric(module_sizes)
+    )
+    rownames(module_annotation_ct) <- colnames(module_cor_ct)
+    
+    # 创建颜色映射
+    col_fun_ct <- colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+    
+    # 绘制复杂热图
+    ht <- Heatmap(module_cor_ct,
+            name = "Correlation",
+            col = col_fun_ct,
+            show_row_names = TRUE,
+            show_column_names = TRUE,
+            row_names_gp = gpar(fontsize = 10),
+            column_names_gp = gpar(fontsize = 10),
+            heatmap_legend_param = list(title = "Correlation", title_gp = gpar(fontsize = 10)),
+            column_title = paste(celltype, "Module Correlation Matrix"),
+            column_title_gp = gpar(fontsize = 12, fontface = "bold"),
+            cell_fun = function(j, i, x, y, width, height, fill) {
+              if(abs(module_cor_ct[i, j]) > 0.3 && module_cor_pval_ct[i, j] < 0.05) {
+                grid.text(sprintf("%.2f", module_cor_ct[i, j]), x, y, 
+                         gp = gpar(fontsize = 9, col = "black", fontface = "bold"))
+              } else if(abs(module_cor_ct[i, j]) > 0.2) {
+                grid.text(sprintf("%.2f", module_cor_ct[i, j]), x, y, 
+                         gp = gpar(fontsize = 8, col = "gray30"))
+              }
+            })
+    
+    draw(ht)
+    dev.off()
+  }
+  
+  cat(celltype, "相关性网络热图创建完成\n")
+}
+
+# ===============================================================================
+# 18. 创建四种细胞类型的比较图
+# ===============================================================================
+
+cat("\n========== 18. 四种细胞类型比较分析 ==========\n")
+
+# 收集所有细胞类型的模块统计信息
+celltype_comparison <- data.frame()
+
+for (celltype in names(celltype_results)) {
+  ct_result <- celltype_results[[celltype]]
+  
+  # 计算模块统计
+  module_counts <- table(ct_result$module_colors)
+  n_modules <- length(module_counts) - ifelse("grey" %in% names(module_counts), 1, 0)
+  
+  # 计算平均模块大小
+  non_grey_modules <- module_counts[names(module_counts) != "grey"]
+  avg_module_size <- ifelse(length(non_grey_modules) > 0, mean(non_grey_modules), 0)
+  
+  # 添加到比较数据框
+  celltype_comparison <- rbind(celltype_comparison, data.frame(
+    CellType = celltype,
+    nSamples = length(ct_result$samples),
+    nGenes = ncol(ct_result$expression_data),
+    nModules = n_modules,
+    AvgModuleSize = round(avg_module_size, 1),
+    SoftThreshold = ct_result$soft_threshold,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# 创建比较可视化
+if (nrow(celltype_comparison) > 0) {
+  pdf(file.path(output_dir, "15_celltype_comparison.pdf"), width = 16, height = 12)
+  
+  par(mfrow = c(2, 3), mar = c(5, 4, 4, 2))
+  
+  # 1. 样本数量比较
+  barplot(celltype_comparison$nSamples, 
+          names.arg = celltype_comparison$CellType,
+          main = "Number of Samples by Cell Type",
+          ylab = "Sample Count",
+          col = rainbow(nrow(celltype_comparison)),
+          las = 2, cex.names = 0.8)
+  
+  # 2. 基因数量比较
+  barplot(celltype_comparison$nGenes, 
+          names.arg = celltype_comparison$CellType,
+          main = "Number of Genes by Cell Type",
+          ylab = "Gene Count",
+          col = rainbow(nrow(celltype_comparison)),
+          las = 2, cex.names = 0.8)
+  
+  # 3. 模块数量比较
+  barplot(celltype_comparison$nModules, 
+          names.arg = celltype_comparison$CellType,
+          main = "Number of Modules by Cell Type",
+          ylab = "Module Count",
+          col = rainbow(nrow(celltype_comparison)),
+          las = 2, cex.names = 0.8)
+  
+  # 4. 平均模块大小比较
+  barplot(celltype_comparison$AvgModuleSize, 
+          names.arg = celltype_comparison$CellType,
+          main = "Average Module Size by Cell Type",
+          ylab = "Average Module Size",
+          col = rainbow(nrow(celltype_comparison)),
+          las = 2, cex.names = 0.8)
+  
+  # 5. 软阈值比较
+  barplot(celltype_comparison$SoftThreshold, 
+          names.arg = celltype_comparison$CellType,
+          main = "Soft Threshold by Cell Type",
+          ylab = "Soft Threshold",
+          col = rainbow(nrow(celltype_comparison)),
+          las = 2, cex.names = 0.8)
+  
+  # 6. 综合散点图：模块数 vs 平均模块大小
+  plot(celltype_comparison$nModules, celltype_comparison$AvgModuleSize,
+       xlab = "Number of Modules", ylab = "Average Module Size",
+       main = "Modules vs Average Size",
+       pch = 19, cex = 2, col = rainbow(nrow(celltype_comparison)))
+  text(celltype_comparison$nModules, celltype_comparison$AvgModuleSize,
+       labels = celltype_comparison$CellType, pos = 3, cex = 0.8)
+  
+  dev.off()
+  
+  # 保存比较表格
+  write.csv(celltype_comparison, file.path(output_dir, "celltype_comparison_table.csv"), row.names = FALSE)
+  cat("细胞类型比较分析完成\n")
+}
+
+# ===============================================================================
+# 19. 保存所有细胞类型特异性结果
+# ===============================================================================
+
+cat("\n========== 17. 保存细胞类型特异性结果 ==========\n")
+
+# 保存所有细胞类型的结果
+saveRDS(celltype_results, file.path(output_dir, "celltype_specific_wgcna_results.rds"))
+
+# 创建细胞类型分析摘要
+celltype_summary <- data.frame(
+  celltype = names(celltype_results),
+  n_samples = sapply(celltype_results, function(x) length(x$samples)),
+  n_genes = sapply(celltype_results, function(x) ncol(x$expression_data)),
+  n_modules = sapply(celltype_results, function(x) length(unique(x$module_colors)) - 1),
+  soft_threshold = sapply(celltype_results, function(x) x$soft_threshold),
+  stringsAsFactors = FALSE
+)
+
+write.csv(celltype_summary, file.path(output_dir, "celltype_analysis_summary.csv"), row.names = FALSE)
+
+# 创建最终报告
+sink(file.path(output_dir, "final_analysis_report.txt"))
+cat("========== WGCNA细胞类型特异性分析完整报告 ==========\n\n")
+cat("分析完成时间:", as.character(Sys.time()), "\n\n")
+
+cat("=== 总体分析 ===\n")
+cat("总样本数:", nrow(datExpr), "\n")
+cat("总基因数:", ncol(datExpr), "\n")
+cat("总模块数:", length(unique(moduleColors)) - 1, "\n")
+
+cat("\n=== 细胞类型特异性分析 ===\n")
+if (nrow(celltype_summary) > 0) {
+  print(celltype_summary)
+} else {
+  cat("未完成任何细胞类型特异性分析\n")
+}
+
+if (exists("combined_results")) {
+  cat("\n=== 合并细胞类型分析 ===\n")
+  cat("合并的细胞类型:", paste(combined_celltypes, collapse = ", "), "\n")
+  cat("合并样本数:", length(combined_results$samples), "\n")
+  cat("合并分析基因数:", ncol(combined_results$expression_data), "\n")
+  cat("合并分析模块数:", length(unique(combined_results$module_colors)) - 1, "\n")
+}
+
+cat("\n=== 输出文件列表 ===\n")
+output_files <- list.files(output_dir, full.names = FALSE)
+for (file in output_files) {
+  cat("-", file, "\n")
+}
+
+sink()
+
+cat("\n========== 全部分析完成 ==========\n")
+cat("详细结果请查看:", output_dir, "\n")
+```
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
