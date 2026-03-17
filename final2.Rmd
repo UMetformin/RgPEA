@@ -1,0 +1,2283 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+# =============================================================================
+# Epi7 与 Epi13 异质性综合分析
+# 比较 BHI vs PEA 组中的细胞异质性
+# =============================================================================
+
+# 清理内存
+gc()
+
+# 加载必要的包
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(pheatmap)
+library(viridis)
+library(RColorBrewer)
+library(ggridges)
+library(gridExtra)
+library(igraph)
+library(SCENIC)
+library(AUCell)
+library(RcisTarget)
+library(scater)
+library(scran)
+
+# 设置工作目录
+setwd("F:/projectmanfei/final")
+
+# 创建输出目录
+heterogeneity_dir <- "heterogeneity_analysis"
+if (!dir.exists(heterogeneity_dir)) {
+  dir.create(heterogeneity_dir)
+}
+
+# 创建子目录
+subcluster_dir <- file.path(heterogeneity_dir, "01_subclustering")
+heterogeneity_score_dir <- file.path(heterogeneity_dir, "02_heterogeneity_scores")
+tf_activity_dir <- file.path(heterogeneity_dir, "03_tf_activity")
+cell_cycle_dir <- file.path(heterogeneity_dir, "04_cell_cycle")
+entropy_dir <- file.path(heterogeneity_dir, "05_entropy_analysis")
+pseudotime_dir <- file.path(heterogeneity_dir, "06_pseudotime_density")
+
+dir.create(subcluster_dir, showWarnings = FALSE)
+dir.create(heterogeneity_score_dir, showWarnings = FALSE)
+dir.create(tf_activity_dir, showWarnings = FALSE)
+dir.create(cell_cycle_dir, showWarnings = FALSE)
+dir.create(entropy_dir, showWarnings = FALSE)
+dir.create(pseudotime_dir, showWarnings = FALSE)
+
+cat("=====================================\n")
+cat("===== Epi7/Epi13 Heterogeneity Analysis =====\n")
+cat("=====================================\n\n")
+
+# =============================================================================
+# 步骤0：加载数据
+# =============================================================================
+cat("===== Step 0: Loading Data =====\n")
+
+# 加载之前保存的数据
+seurat_pure <- readRDS("stage0_preprocessing_results/seurat_pure_annotated.rds")
+trajectory_data <- read.csv("enhanced_trajectory_analysis/comprehensive_trajectory_data.csv")
+feature_genes <- read.csv("machine_learning_comprehensive_analysis/sensitivity_analysis/feature_genes_detailed_report.csv")
+
+# 提取高一致性特征基因
+consensus_genes <- feature_genes %>%
+  filter(Selection_Count >= 3) %>%
+  pull(Gene)
+
+cat(sprintf("Loaded data:\n"))
+cat(sprintf("  - Seurat object: %d cells\n", ncol(seurat_pure)))
+cat(sprintf("  - Trajectory data: %d cells\n", nrow(trajectory_data)))
+cat(sprintf("  - Consensus genes: %d genes\n", length(consensus_genes)))
+
+# 提取Epi7和Epi13细胞
+seurat_epi <- subset(seurat_pure, refined_celltype %in% c("Epithelial_7", "Epithelial_13"))
+cat(sprintf("\nExtracted Epi7/Epi13: %d cells\n", ncol(seurat_epi)))
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤1：亚群识别与重新聚类
+# =============================================================================
+cat("\n===== Step 1: Subcluster Identification =====\n")
+
+perform_subclustering <- function(seurat_obj, celltype_name, resolution = 0.3) {
+  cat(sprintf("\nSubclustering %s...\n", celltype_name))
+  
+  # 子集化
+  seurat_sub <- subset(seurat_obj, refined_celltype == celltype_name)
+  
+  # 标准化和聚类
+  seurat_sub <- NormalizeData(seurat_sub, verbose = FALSE)
+  seurat_sub <- FindVariableFeatures(seurat_sub, nfeatures = 2000, verbose = FALSE)
+  seurat_sub <- ScaleData(seurat_sub, verbose = FALSE)
+  seurat_sub <- RunPCA(seurat_sub, npcs = 30, verbose = FALSE)
+  seurat_sub <- FindNeighbors(seurat_sub, dims = 1:20, verbose = FALSE)
+  seurat_sub <- FindClusters(seurat_sub, resolution = resolution, verbose = FALSE)
+  seurat_sub <- RunUMAP(seurat_sub, dims = 1:20, verbose = FALSE)
+  
+  # 添加亚群信息
+  seurat_sub$subcluster <- paste0(celltype_name, "_sub", seurat_sub$seurat_clusters)
+  
+  cat(sprintf("  Found %d subclusters\n", length(unique(seurat_sub$subcluster))))
+  
+  return(seurat_sub)
+}
+
+# 对Epi7和Epi13分别进行亚群分析
+seurat_epi7 <- perform_subclustering(seurat_epi, "Epithelial_7", resolution = 0.3)
+seurat_epi13 <- perform_subclustering(seurat_epi, "Epithelial_13", resolution = 0.3)
+
+# 可视化亚群
+# Epi7 subclusters
+p1 <- DimPlot(seurat_epi7, group.by = "subcluster", split.by = "group", 
+              label = TRUE, repel = TRUE) +
+  ggtitle("Epithelial_7 Subclusters") +
+  theme(legend.position = "right")
+
+ggsave(file.path(subcluster_dir, "01_Epi7_subclusters_umap.pdf"), 
+       p1, width = 12, height = 6)
+ggsave(file.path(subcluster_dir, "01_Epi7_subclusters_umap.png"), 
+       p1, width = 12, height = 6, dpi = 300)
+
+# Epi13 subclusters
+p2 <- DimPlot(seurat_epi13, group.by = "subcluster", split.by = "group", 
+              label = TRUE, repel = TRUE) +
+  ggtitle("Epithelial_13 Subclusters") +
+  theme(legend.position = "right")
+
+ggsave(file.path(subcluster_dir, "02_Epi13_subclusters_umap.pdf"), 
+       p2, width = 12, height = 6)
+ggsave(file.path(subcluster_dir, "02_Epi13_subclusters_umap.png"), 
+       p2, width = 12, height = 6, dpi = 300)
+
+# 统计亚群分布
+epi7_subcluster_stats <- seurat_epi7@meta.data %>%
+  group_by(group, subcluster) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(group) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+epi13_subcluster_stats <- seurat_epi13@meta.data %>%
+  group_by(group, subcluster) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(group) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+write.csv(epi7_subcluster_stats, 
+          file.path(subcluster_dir, "Epi7_subcluster_distribution.csv"), 
+          row.names = FALSE)
+write.csv(epi13_subcluster_stats, 
+          file.path(subcluster_dir, "Epi13_subcluster_distribution.csv"), 
+          row.names = FALSE)
+
+# 亚群分布柱状图
+p3 <- ggplot(epi7_subcluster_stats, aes(x = subcluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Epithelial_7 Subcluster Distribution",
+       x = "Subcluster", y = "Percentage (%)", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(file.path(subcluster_dir, "03_Epi7_subcluster_barplot.pdf"), 
+       p3, width = 10, height = 6)
+ggsave(file.path(subcluster_dir, "03_Epi7_subcluster_barplot.png"), 
+       p3, width = 10, height = 6, dpi = 300)
+
+p4 <- ggplot(epi13_subcluster_stats, aes(x = subcluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Epithelial_13 Subcluster Distribution",
+       x = "Subcluster", y = "Percentage (%)", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(file.path(subcluster_dir, "04_Epi13_subcluster_barplot.pdf"), 
+       p4, width = 10, height = 6)
+ggsave(file.path(subcluster_dir, "04_Epi13_subcluster_barplot.png"), 
+       p4, width = 10, height = 6, dpi = 300)
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤2：单细胞异质性量化
+# =============================================================================
+cat("\n===== Step 2: Quantifying Single-cell Heterogeneity =====\n")
+
+calculate_heterogeneity_metrics <- function(seurat_obj, celltype_name, group_name) {
+  # 提取特定细胞类型和组别
+  cells <- seurat_obj@meta.data %>%
+    filter(refined_celltype == celltype_name, group == group_name) %>%
+    rownames()
+  
+  if (length(cells) < 10) {
+    return(NULL)
+  }
+  
+  # 提取表达数据
+  expr_data <- as.matrix(GetAssayData(seurat_obj, slot = "data")[, cells])
+  
+  # 1. 变异系数 (Coefficient of Variation)
+  gene_means <- rowMeans(expr_data)
+  gene_sds <- apply(expr_data, 1, sd)
+  cv <- gene_sds / (gene_means + 1e-10)
+  mean_cv <- mean(cv[is.finite(cv)])
+  
+  # 2. 基因表达熵
+  calculate_entropy <- function(x) {
+    x <- x[x > 0]
+    if (length(x) < 2) return(0)
+    p <- x / sum(x)
+    -sum(p * log2(p))
+  }
+  
+  gene_entropies <- apply(expr_data, 1, calculate_entropy)
+  mean_entropy <- mean(gene_entropies[is.finite(gene_entropies)])
+  
+  # 3. 细胞间欧氏距离
+  if (ncol(expr_data) > 1) {
+    cell_distances <- dist(t(expr_data))
+    mean_distance <- mean(cell_distances)
+    sd_distance <- sd(cell_distances)
+  } else {
+    mean_distance <- NA
+    sd_distance <- NA
+  }
+  
+  # 4. 使用高变基因计算
+  variable_genes <- VariableFeatures(seurat_obj)
+  if (length(variable_genes) > 0) {
+    var_expr <- expr_data[intersect(rownames(expr_data), variable_genes), ]
+    if (nrow(var_expr) > 0) {
+      var_cv <- apply(var_expr, 1, function(x) sd(x) / (mean(x) + 1e-10))
+      mean_var_cv <- mean(var_cv[is.finite(var_cv)])
+    } else {
+      mean_var_cv <- NA
+    }
+  } else {
+    mean_var_cv <- NA
+  }
+  
+  return(data.frame(
+    CellType = celltype_name,
+    Group = group_name,
+    N_Cells = length(cells),
+    Mean_CV = mean_cv,
+    Mean_Entropy = mean_entropy,
+    Mean_Cell_Distance = mean_distance,
+    SD_Cell_Distance = sd_distance,
+    Mean_Variable_CV = mean_var_cv,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# 计算所有组合的异质性指标
+heterogeneity_metrics <- list()
+
+for (celltype in c("Epithelial_7", "Epithelial_13")) {
+  for (group in c("BHI", "PEA")) {
+    cat(sprintf("Calculating heterogeneity for %s in %s...\n", celltype, group))
+    
+    metrics <- calculate_heterogeneity_metrics(seurat_epi, celltype, group)
+    
+    if (!is.null(metrics)) {
+      heterogeneity_metrics[[paste(celltype, group, sep = "_")]] <- metrics
+    }
+  }
+}
+
+# 合并结果
+heterogeneity_df <- do.call(rbind, heterogeneity_metrics)
+rownames(heterogeneity_df) <- NULL
+
+write.csv(heterogeneity_df, 
+          file.path(heterogeneity_score_dir, "heterogeneity_metrics_summary.csv"), 
+          row.names = FALSE)
+
+# 可视化异质性指标
+metrics_long <- heterogeneity_df %>%
+  select(CellType, Group, Mean_CV, Mean_Entropy, Mean_Variable_CV) %>%
+  pivot_longer(cols = c(Mean_CV, Mean_Entropy, Mean_Variable_CV), 
+               names_to = "Metric", values_to = "Value")
+
+p5 <- ggplot(metrics_long, aes(x = CellType, y = Value, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Metric, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Heterogeneity Metrics Comparison",
+       x = "Cell Type", y = "Metric Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(file.path(heterogeneity_score_dir, "01_heterogeneity_metrics_barplot.pdf"), 
+       p5, width = 10, height = 10)
+ggsave(file.path(heterogeneity_score_dir, "01_heterogeneity_metrics_barplot.png"), 
+       p5, width = 10, height = 10, dpi = 300)
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤3：基于机器学习特征基因的异质性评分
+# =============================================================================
+cat("\n===== Step 3: ML Feature-based Heterogeneity Score =====\n")
+
+calculate_ml_heterogeneity <- function(seurat_obj, consensus_genes) {
+  # 提取表达数据
+  available_genes <- intersect(consensus_genes, rownames(seurat_obj))
+  
+  if (length(available_genes) < 10) {
+    cat("Warning: Too few consensus genes available\n")
+    return(NULL)
+  }
+  
+  expr_matrix <- as.matrix(GetAssayData(seurat_obj, slot = "data")[available_genes, ])
+  
+  # 方法1: 与群体均值的欧氏距离
+  group_mean <- rowMeans(expr_matrix)
+  euclidean_dist <- apply(expr_matrix, 2, function(x) {
+    sqrt(sum((x - group_mean)^2))
+  })
+  
+  # 方法2: KNN距离
+  if (ncol(expr_matrix) > 10) {
+    knn_dist <- apply(expr_matrix, 2, function(cell) {
+      distances <- apply(expr_matrix, 2, function(other_cell) {
+        sqrt(sum((cell - other_cell)^2))
+      })
+      mean(sort(distances)[2:6])  # 取最近5个邻居的平均距离
+    })
+  } else {
+    knn_dist <- rep(NA, ncol(expr_matrix))
+  }
+  
+  # 方法3: 局部密度估计
+  if (ncol(expr_matrix) > 10) {
+    local_density <- apply(expr_matrix, 2, function(cell) {
+      distances <- apply(expr_matrix, 2, function(other_cell) {
+        sqrt(sum((cell - other_cell)^2))
+      })
+      # 使用高斯核
+      sum(exp(-distances^2 / (2 * median(distances)^2)))
+    })
+  } else {
+    local_density <- rep(NA, ncol(expr_matrix))
+  }
+  
+  # 创建数据框
+  heterogeneity_scores <- data.frame(
+    cell_id = colnames(expr_matrix),
+    euclidean_distance = euclidean_dist,
+    knn_distance = knn_dist,
+    local_density = local_density,
+    stringsAsFactors = FALSE
+  )
+  
+  return(heterogeneity_scores)
+}
+
+# 计算异质性评分
+cat("Calculating ML-based heterogeneity scores...\n")
+ml_scores <- calculate_ml_heterogeneity(seurat_epi, consensus_genes)
+
+if (!is.null(ml_scores)) {
+  # 添加元数据
+  ml_scores <- ml_scores %>%
+    left_join(seurat_epi@meta.data %>% 
+               select(refined_celltype, group) %>%
+               rownames_to_column("cell_id"), 
+             by = "cell_id")
+  
+  # 保存结果
+  write.csv(ml_scores, 
+            file.path(heterogeneity_score_dir, "ml_based_heterogeneity_scores.csv"), 
+            row.names = FALSE)
+  
+  # 可视化
+  p6 <- ggplot(ml_scores, aes(x = refined_celltype, y = euclidean_distance, fill = group)) +
+    geom_violin(alpha = 0.7) +
+    geom_boxplot(width = 0.1, position = position_dodge(0.9)) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "ML Feature-based Heterogeneity (Euclidean Distance)",
+         x = "Cell Type", y = "Distance from Population Mean") +
+    theme_minimal()
+  
+  ggsave(file.path(heterogeneity_score_dir, "02_ml_heterogeneity_euclidean.pdf"), 
+         p6, width = 10, height = 6)
+  ggsave(file.path(heterogeneity_score_dir, "02_ml_heterogeneity_euclidean.png"), 
+         p6, width = 10, height = 6, dpi = 300)
+  
+  p7 <- ggplot(ml_scores, aes(x = refined_celltype, y = knn_distance, fill = group)) +
+    geom_violin(alpha = 0.7) +
+    geom_boxplot(width = 0.1, position = position_dodge(0.9)) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "ML Feature-based Heterogeneity (KNN Distance)",
+         x = "Cell Type", y = "Mean KNN Distance") +
+    theme_minimal()
+  
+  ggsave(file.path(heterogeneity_score_dir, "03_ml_heterogeneity_knn.pdf"), 
+         p7, width = 10, height = 6)
+  ggsave(file.path(heterogeneity_score_dir, "03_ml_heterogeneity_knn.png"), 
+         p7, width = 10, height = 6, dpi = 300)
+  
+  # 统计检验
+  stat_results <- ml_scores %>%
+    group_by(refined_celltype) %>%
+    summarise(
+      wilcox_p_euclidean = wilcox.test(
+        euclidean_distance[group == "PEA"],
+        euclidean_distance[group == "BHI"]
+      )$p.value,
+      wilcox_p_knn = wilcox.test(
+        knn_distance[group == "PEA"],
+        knn_distance[group == "BHI"]
+      )$p.value,
+      mean_euclidean_BHI = mean(euclidean_distance[group == "BHI"], na.rm = TRUE),
+      mean_euclidean_PEA = mean(euclidean_distance[group == "PEA"], na.rm = TRUE),
+      mean_knn_BHI = mean(knn_distance[group == "BHI"], na.rm = TRUE),
+      mean_knn_PEA = mean(knn_distance[group == "PEA"], na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  write.csv(stat_results, 
+            file.path(heterogeneity_score_dir, "heterogeneity_statistical_tests.csv"), 
+            row.names = FALSE)
+}
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤4：细胞周期异质性分析
+# =============================================================================
+cat("\n===== Step 4: Cell Cycle Heterogeneity =====\n")
+
+# 加载细胞周期基因
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# 计算细胞周期评分
+seurat_epi <- CellCycleScoring(seurat_epi, 
+                               s.features = s.genes, 
+                               g2m.features = g2m.genes,
+                               set.ident = FALSE)
+
+# 统计细胞周期分布
+cell_cycle_stats <- seurat_epi@meta.data %>%
+  group_by(refined_celltype, group, Phase) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(refined_celltype, group) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+write.csv(cell_cycle_stats, 
+          file.path(cell_cycle_dir, "cell_cycle_distribution.csv"), 
+          row.names = FALSE)
+
+# 可视化细胞周期分布
+p8 <- ggplot(cell_cycle_stats, aes(x = refined_celltype, y = percentage, fill = Phase)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~group) +
+  scale_fill_manual(values = c("G1" = "#F8766D", "G2M" = "#00BA38", "S" = "#619CFF")) +
+  labs(title = "Cell Cycle Phase Distribution",
+       x = "Cell Type", y = "Percentage (%)", fill = "Phase") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(file.path(cell_cycle_dir, "01_cell_cycle_distribution.pdf"), 
+       p8, width = 10, height = 6)
+ggsave(file.path(cell_cycle_dir, "01_cell_cycle_distribution.png"), 
+       p8, width = 10, height = 6, dpi = 300)
+
+# 细胞周期评分对比
+p9 <- ggplot(seurat_epi@meta.data, aes(x = S.Score, y = G2M.Score, color = Phase)) +
+  geom_point(alpha = 0.5) +
+  facet_grid(refined_celltype ~ group) +
+  scale_color_manual(values = c("G1" = "#F8766D", "G2M" = "#00BA38", "S" = "#619CFF")) +
+  labs(title = "Cell Cycle Score Distribution",
+       x = "S Score", y = "G2M Score") +
+  theme_minimal()
+
+ggsave(file.path(cell_cycle_dir, "02_cell_cycle_scores.pdf"), 
+       p9, width = 12, height = 8)
+ggsave(file.path(cell_cycle_dir, "02_cell_cycle_scores.png"), 
+       p9, width = 12, height = 8, dpi = 300)
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤5：单细胞熵和复杂度分析
+# =============================================================================
+cat("\n===== Step 5: Single-cell Entropy Analysis =====\n")
+
+calculate_cell_entropy <- function(expr_vector) {
+  # 计算单个细胞的表达熵
+  expr_vector <- expr_vector[expr_vector > 0]
+  if (length(expr_vector) < 2) return(0)
+  
+  p <- expr_vector / sum(expr_vector)
+  entropy <- -sum(p * log2(p))
+  
+  return(entropy)
+}
+
+# 计算每个细胞的熵
+cat("Calculating single-cell entropy...\n")
+expr_matrix <- as.matrix(GetAssayData(seurat_epi, slot = "data"))
+
+cell_entropies <- apply(expr_matrix, 2, calculate_cell_entropy)
+
+# 添加到Seurat对象
+seurat_epi$entropy <- cell_entropies
+
+# 统计
+entropy_stats <- seurat_epi@meta.data %>%
+  group_by(refined_celltype, group) %>%
+  summarise(
+    mean_entropy = mean(entropy, na.rm = TRUE),
+    sd_entropy = sd(entropy, na.rm = TRUE),
+    median_entropy = median(entropy, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+write.csv(entropy_stats, 
+          file.path(entropy_dir, "entropy_statistics.csv"), 
+          row.names = FALSE)
+
+# 可视化熵分布
+p10 <- ggplot(seurat_epi@meta.data, aes(x = refined_celltype, y = entropy, fill = group)) +
+  geom_violin(alpha = 0.7) +
+  geom_boxplot(width = 0.1, position = position_dodge(0.9)) +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Single-cell Expression Entropy",
+       x = "Cell Type", y = "Shannon Entropy") +
+  theme_minimal()
+
+ggsave(file.path(entropy_dir, "01_cell_entropy_distribution.pdf"), 
+       p10, width = 10, height = 6)
+ggsave(file.path(entropy_dir, "01_cell_entropy_distribution.png"), 
+       p10, width = 10, height = 6, dpi = 300)
+
+# 熵与细胞周期的关系
+p11 <- ggplot(seurat_epi@meta.data, aes(x = Phase, y = entropy, fill = group)) +
+  geom_violin(alpha = 0.7) +
+  geom_boxplot(width = 0.3, position = position_dodge(0.9)) +
+  facet_wrap(~refined_celltype) +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Entropy vs Cell Cycle Phase",
+       x = "Cell Cycle Phase", y = "Shannon Entropy") +
+  theme_minimal()
+
+ggsave(file.path(entropy_dir, "02_entropy_vs_cell_cycle.pdf"), 
+       p11, width = 12, height = 6)
+ggsave(file.path(entropy_dir, "02_entropy_vs_cell_cycle.png"), 
+       p11, width = 12, height = 6, dpi = 300)
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤6：伪时间分布密度分析
+# =============================================================================
+cat("\n===== Step 6: Pseudotime Density Analysis =====\n")
+
+# 过滤轨迹数据
+trajectory_epi <- trajectory_data %>%
+  filter(refined_celltype %in% c("Epithelial_7", "Epithelial_13"))
+
+# 密度脊线图
+p12 <- ggplot(trajectory_epi, 
+              aes(x = pseudotime, y = interaction(refined_celltype, group), 
+                  fill = group)) +
+  geom_density_ridges(alpha = 0.7, scale = 2) +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Pseudotime Distribution Density",
+       x = "Pseudotime", y = "Cell Type - Group") +
+  theme_minimal()
+
+ggsave(file.path(pseudotime_dir, "01_pseudotime_density_ridges.pdf"), 
+       p12, width = 10, height = 6)
+ggsave(file.path(pseudotime_dir, "01_pseudotime_density_ridges.png"), 
+       p12, width = 10, height = 6, dpi = 300)
+
+# 累积分布函数 (CDF)
+p13 <- ggplot(trajectory_epi, aes(x = pseudotime, color = group)) +
+  stat_ecdf(geom = "step", size = 1) +
+  facet_wrap(~refined_celltype) +
+  scale_color_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Pseudotime Cumulative Distribution",
+       x = "Pseudotime", y = "Cumulative Probability") +
+  theme_minimal()
+
+ggsave(file.path(pseudotime_dir, "02_pseudotime_cdf.pdf"), 
+       p13, width = 10, height = 6)
+ggsave(file.path(pseudotime_dir, "02_pseudotime_cdf.png"), 
+       p13, width = 10, height = 6, dpi = 300)
+
+# 统计检验伪时间分布差异
+pseudotime_tests <- trajectory_epi %>%
+  group_by(refined_celltype) %>%
+  summarise(
+    ks_test_p = ks.test(pseudotime[group == "BHI"], 
+                        pseudotime[group == "PEA"])$p.value,
+    wilcox_p = wilcox.test(pseudotime[group == "BHI"], 
+                          pseudotime[group == "PEA"])$p.value,
+    mean_pseudotime_BHI = mean(pseudotime[group == "BHI"], na.rm = TRUE),
+    mean_pseudotime_PEA = mean(pseudotime[group == "PEA"], na.rm = TRUE),
+    median_pseudotime_BHI = median(pseudotime[group == "BHI"], na.rm = TRUE),
+    median_pseudotime_PEA = median(pseudotime[group == "PEA"], na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+write.csv(pseudotime_tests, 
+          file.path(pseudotime_dir, "pseudotime_distribution_tests.csv"), 
+          row.names = FALSE)
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤7：转录因子活性推断 (简化版使用AUCell)
+# =============================================================================
+cat("\n===== Step 7: Transcription Factor Activity Inference =====\n")
+
+# 定义关键转录因子及其靶基因集
+tf_gene_sets <- list(
+  # 上皮分化相关TF
+  CDX2 = c("Cdx2", "Krt20", "Muc2", "Guca2a", "Guca2b", "Car1"),
+  HNF4A = c("Hnf4a", "Apoa1", "Apoa4", "Fabp1", "Fabp2", "Alb"),
+  GATA4 = c("Gata4", "Gata6", "Sox9", "Lgr5", "Cdh1"),
+  
+  # 应激反应TF
+  NFE2L2 = c("Nfe2l2", "Hmox1", "Nqo1", "Gclc", "Gclm", "Gsta1"),
+  ATF4 = c("Atf4", "Ddit3", "Atf3", "Trib3", "Ppp1r15a"),
+  XBP1 = c("Xbp1", "Hspa5", "Hsp90b1", "Dnajb9", "Edem1"),
+  
+  # 炎症相关TF
+  NFKB = c("Nfkb1", "Nfkb2", "Rela", "Relb", "Tnf", "Il6", "Il1b"),
+  STAT3 = c("Stat3", "Socs3", "Myc", "Ccnd1", "Bcl2l1"),
+  
+  # 增殖相关TF
+  MYC = c("Myc", "Ccnd1", "Cdk4", "E2f1", "Pcna", "Mki67"),
+  
+  # Tuft分化相关TF
+  POU2F3 = c("Pou2f3", "Dclk1", "Trpm5", "Il25", "Gfi1b", "Chat")
+)
+
+# 使用AUCell计算TF活性
+cat("Calculating TF activity scores using AUCell...\n")
+
+# 准备表达矩阵
+expr_matrix_epi <- as.matrix(GetAssayData(seurat_epi, slot = "data"))
+
+# 过滤基因集，只保留存在的基因
+tf_gene_sets_filtered <- lapply(tf_gene_sets, function(genes) {
+  intersect(genes, rownames(expr_matrix_epi))
+})
+
+# 移除空基因集
+tf_gene_sets_filtered <- tf_gene_sets_filtered[sapply(tf_gene_sets_filtered, length) > 0]
+
+# 构建基因集排名
+tryCatch({
+  cells_rankings <- AUCell_buildRankings(expr_matrix_epi, 
+                                        nCores = 1, 
+                                        plotStats = FALSE,
+                                        verbose = FALSE)
+  
+  # 计算AUC
+  cells_AUC <- AUCell_calcAUC(tf_gene_sets_filtered, 
+                             cells_rankings,
+                             nCores = 1,
+                             verbose = FALSE)
+  
+  # 提取AUC矩阵
+  auc_matrix <- getAUC(cells_AUC)
+  
+  # 添加到Seurat对象
+  for (tf_name in rownames(auc_matrix)) {
+    seurat_epi@meta.data[[paste0("TF_", tf_name)]] <- auc_matrix[tf_name, ]
+  }
+  
+  # 统计TF活性
+  tf_activity_stats <- seurat_epi@meta.data %>%
+    select(refined_celltype, group, starts_with("TF_")) %>%
+    pivot_longer(cols = starts_with("TF_"), 
+                 names_to = "TF", 
+                 values_to = "Activity") %>%
+    group_by(refined_celltype, group, TF) %>%
+    summarise(
+      mean_activity = mean(Activity, na.rm = TRUE),
+      sd_activity = sd(Activity, na.rm = TRUE),
+      median_activity = median(Activity, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  write.csv(tf_activity_stats, 
+            file.path(tf_activity_dir, "tf_activity_statistics.csv"), 
+            row.names = FALSE)
+  
+  # 可视化TF活性热图
+  tf_heatmap_data <- tf_activity_stats %>%
+    select(refined_celltype, group, TF, mean_activity) %>%
+    unite("condition", refined_celltype, group, sep = "_") %>%
+    pivot_wider(names_from = TF, values_from = mean_activity) %>%
+    column_to_rownames("condition")
+  
+  # 移除TF_前缀
+  colnames(tf_heatmap_data) <- gsub("TF_", "", colnames(tf_heatmap_data))
+  
+  pdf(file.path(tf_activity_dir, "01_tf_activity_heatmap.pdf"), 
+      width = 10, height = 6)
+  pheatmap(t(tf_heatmap_data),
+           scale = "row",
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,
+           main = "Transcription Factor Activity",
+           fontsize = 10,
+           angle_col = "45")
+  dev.off()
+  
+  png(file.path(tf_activity_dir, "01_tf_activity_heatmap.png"), 
+      width = 10*100, height = 6*100, res = 100)
+  pheatmap(t(tf_heatmap_data),
+           scale = "row",
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,
+           main = "Transcription Factor Activity",
+           fontsize = 10,
+           angle_col = "45")
+  dev.off()
+  
+  # TF活性对比（选择关键TF）
+  key_tfs <- c("TF_CDX2", "TF_NFE2L2", "TF_ATF4", "TF_NFKB", "TF_POU2F3")
+  available_tfs <- intersect(key_tfs, colnames(seurat_epi@meta.data))
+  
+  if (length(available_tfs) > 0) {
+    tf_comparison_data <- seurat_epi@meta.data %>%
+      select(refined_celltype, group, all_of(available_tfs)) %>%
+      pivot_longer(cols = all_of(available_tfs), 
+                   names_to = "TF", 
+                   values_to = "Activity") %>%
+      mutate(TF = gsub("TF_", "", TF))
+    
+    p14 <- ggplot(tf_comparison_data, 
+                  aes(x = refined_celltype, y = Activity, fill = group)) +
+      geom_violin(alpha = 0.7) +
+      geom_boxplot(width = 0.1, position = position_dodge(0.9)) +
+      facet_wrap(~TF, scales = "free_y", ncol = 2) +
+      scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+      labs(title = "Key Transcription Factor Activity",
+           x = "Cell Type", y = "Activity Score") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
+    ggsave(file.path(tf_activity_dir, "02_key_tf_activity_comparison.pdf"), 
+           p14, width = 12, height = 10)
+    ggsave(file.path(tf_activity_dir, "02_key_tf_activity_comparison.png"), 
+           p14, width = 12, height = 10, dpi = 300)
+  }
+  
+  # TF活性差异统计检验
+  tf_diff_tests <- seurat_epi@meta.data %>%
+    select(refined_celltype, group, starts_with("TF_")) %>%
+    pivot_longer(cols = starts_with("TF_"), 
+                 names_to = "TF", 
+                 values_to = "Activity") %>%
+    group_by(refined_celltype, TF) %>%
+    summarise(
+      wilcox_p = wilcox.test(Activity[group == "BHI"], 
+                            Activity[group == "PEA"])$p.value,
+      mean_BHI = mean(Activity[group == "BHI"], na.rm = TRUE),
+      mean_PEA = mean(Activity[group == "PEA"], na.rm = TRUE),
+      fold_change = mean_PEA / (mean_BHI + 1e-10),
+      .groups = 'drop'
+    ) %>%
+    mutate(TF = gsub("TF_", "", TF),
+           significant = wilcox_p < 0.05)
+  
+  write.csv(tf_diff_tests, 
+            file.path(tf_activity_dir, "tf_activity_differential_tests.csv"), 
+            row.names = FALSE)
+  
+  cat("TF activity analysis completed successfully\n")
+  
+}, error = function(e) {
+  cat(sprintf("Error in TF activity analysis: %s\n", e$message))
+})
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤8：代谢异质性分析
+# =============================================================================
+cat("\n===== Step 8: Metabolic Heterogeneity Analysis =====\n")
+
+# 定义代谢通路基因集
+metabolic_pathways <- list(
+  Glycolysis = c("Hk1", "Hk2", "Pfkl", "Pfkm", "Aldoa", "Gapdh", "Pgk1", "Eno1", "Pkm", "Ldha"),
+  Oxidative_Phosphorylation = c("Ndufs1", "Ndufs2", "Ndufs3", "Sdhb", "Uqcrc1", "Cox4i1", 
+                                "Cox5a", "Atp5a1", "Atp5b"),
+  Fatty_Acid_Oxidation = c("Cpt1a", "Cpt2", "Acadm", "Acadl", "Hadh", "Echs1"),
+  Glutamine_Metabolism = c("Gls", "Gls2", "Glud1", "Got1", "Got2", "Glul"),
+  Pentose_Phosphate = c("G6pd", "Pgd", "Rpe", "Rpia", "Tkt", "Taldo1"),
+  TCA_Cycle = c("Cs", "Aco2", "Idh1", "Idh2", "Ogdh", "Sucla2", "Sdha", "Fh1", "Mdh2")
+)
+
+# 计算代谢通路评分
+cat("Calculating metabolic pathway scores...\n")
+
+for (pathway_name in names(metabolic_pathways)) {
+  pathway_genes <- intersect(metabolic_pathways[[pathway_name]], 
+                            rownames(seurat_epi))
+  
+  if (length(pathway_genes) >= 3) {
+    seurat_epi <- AddModuleScore(seurat_epi,
+                                 features = list(pathway_genes),
+                                 name = paste0("Metabolic_", pathway_name),
+                                 seed = 123)
+    
+    # 重命名列（移除自动添加的数字）
+    old_col <- paste0("Metabolic_", pathway_name, "1")
+    new_col <- paste0("Metabolic_", pathway_name)
+    if (old_col %in% colnames(seurat_epi@meta.data)) {
+      colnames(seurat_epi@meta.data)[colnames(seurat_epi@meta.data) == old_col] <- new_col
+    }
+  }
+}
+
+# 统计代谢评分
+metabolic_cols <- grep("^Metabolic_", colnames(seurat_epi@meta.data), value = TRUE)
+
+if (length(metabolic_cols) > 0) {
+  metabolic_stats <- seurat_epi@meta.data %>%
+    select(refined_celltype, group, all_of(metabolic_cols)) %>%
+    pivot_longer(cols = all_of(metabolic_cols), 
+                 names_to = "Pathway", 
+                 values_to = "Score") %>%
+    group_by(refined_celltype, group, Pathway) %>%
+    summarise(
+      mean_score = mean(Score, na.rm = TRUE),
+      sd_score = sd(Score, na.rm = TRUE),
+      cv_score = sd_score / abs(mean_score + 1e-10),
+      .groups = 'drop'
+    ) %>%
+    mutate(Pathway = gsub("Metabolic_", "", Pathway))
+  
+  write.csv(metabolic_stats, 
+            file.path(heterogeneity_dir, "metabolic_pathway_statistics.csv"), 
+            row.names = FALSE)
+  
+  # 可视化代谢评分
+  p15 <- ggplot(metabolic_stats, 
+                aes(x = refined_celltype, y = mean_score, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    facet_wrap(~Pathway, scales = "free_y", ncol = 2) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "Metabolic Pathway Activity",
+         x = "Cell Type", y = "Mean Pathway Score") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  ggsave(file.path(heterogeneity_dir, "metabolic_pathway_activity.pdf"), 
+         p15, width = 12, height = 10)
+  ggsave(file.path(heterogeneity_dir, "metabolic_pathway_activity.png"), 
+         p15, width = 12, height = 10, dpi = 300)
+  
+  # 代谢异质性（CV）
+  p16 <- ggplot(metabolic_stats, 
+                aes(x = refined_celltype, y = cv_score, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    facet_wrap(~Pathway, scales = "free_y", ncol = 2) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "Metabolic Pathway Heterogeneity (CV)",
+         x = "Cell Type", y = "Coefficient of Variation") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  ggsave(file.path(heterogeneity_dir, "metabolic_heterogeneity_cv.pdf"), 
+         p16, width = 12, height = 10)
+  ggsave(file.path(heterogeneity_dir, "metabolic_heterogeneity_cv.png"), 
+         p16, width = 12, height = 10, dpi = 300)
+}
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤9：综合异质性指数
+# =============================================================================
+cat("\n===== Step 9: Comprehensive Heterogeneity Index =====\n")
+
+# 整合所有异质性指标
+comprehensive_heterogeneity <- seurat_epi@meta.data %>%
+  select(refined_celltype, group, entropy) %>%
+  group_by(refined_celltype, group) %>%
+  summarise(
+    n_cells = n(),
+    entropy_mean = mean(entropy, na.rm = TRUE),
+    entropy_cv = sd(entropy, na.rm = TRUE) / (mean(entropy, na.rm = TRUE) + 1e-10),
+    .groups = 'drop'
+  )
+
+# 添加ML异质性指标
+if (!is.null(ml_scores)) {
+  ml_summary <- ml_scores %>%
+    group_by(refined_celltype, group) %>%
+    summarise(
+      euclidean_mean = mean(euclidean_distance, na.rm = TRUE),
+      euclidean_cv = sd(euclidean_distance, na.rm = TRUE) / 
+                     (mean(euclidean_distance, na.rm = TRUE) + 1e-10),
+      knn_mean = mean(knn_distance, na.rm = TRUE),
+      knn_cv = sd(knn_distance, na.rm = TRUE) / 
+               (mean(knn_distance, na.rm = TRUE) + 1e-10),
+      .groups = 'drop'
+    )
+  
+  comprehensive_heterogeneity <- comprehensive_heterogeneity %>%
+    left_join(ml_summary, by = c("refined_celltype", "group"))
+}
+
+# 添加细胞周期多样性
+cell_cycle_diversity <- seurat_epi@meta.data %>%
+  group_by(refined_celltype, group) %>%
+  summarise(
+    phase_entropy = {
+      phase_counts <- table(Phase)
+      phase_probs <- phase_counts / sum(phase_counts)
+      -sum(phase_probs * log2(phase_probs + 1e-10))
+    },
+    .groups = 'drop'
+  )
+
+comprehensive_heterogeneity <- comprehensive_heterogeneity %>%
+  left_join(cell_cycle_diversity, by = c("refined_celltype", "group"))
+
+# 计算综合异质性指数（标准化后平均）
+heterogeneity_metrics_to_normalize <- c("entropy_cv", "euclidean_cv", "knn_cv", "phase_entropy")
+available_metrics <- intersect(heterogeneity_metrics_to_normalize, 
+                              colnames(comprehensive_heterogeneity))
+
+if (length(available_metrics) > 0) {
+  # 标准化
+  for (metric in available_metrics) {
+    values <- comprehensive_heterogeneity[[metric]]
+    normalized <- (values - min(values, na.rm = TRUE)) / 
+                 (max(values, na.rm = TRUE) - min(values, na.rm = TRUE) + 1e-10)
+    comprehensive_heterogeneity[[paste0(metric, "_norm")]] <- normalized
+  }
+  
+  # 计算综合指数
+  norm_cols <- paste0(available_metrics, "_norm")
+  comprehensive_heterogeneity$heterogeneity_index <- rowMeans(
+    comprehensive_heterogeneity[, norm_cols], na.rm = TRUE
+  )
+}
+
+# 保存结果
+write.csv(comprehensive_heterogeneity, 
+          file.path(heterogeneity_dir, "comprehensive_heterogeneity_index.csv"), 
+          row.names = FALSE)
+
+# 可视化综合异质性指数
+if ("heterogeneity_index" %in% colnames(comprehensive_heterogeneity)) {
+  p17 <- ggplot(comprehensive_heterogeneity, 
+                aes(x = refined_celltype, y = heterogeneity_index, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_text(aes(label = sprintf("%.3f", heterogeneity_index)), 
+              position = position_dodge(width = 0.9), vjust = -0.5) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "Comprehensive Heterogeneity Index",
+         x = "Cell Type", y = "Heterogeneity Index (0-1)",
+         caption = "Index based on entropy CV, euclidean CV, KNN CV, and phase entropy") +
+    theme_minimal()
+  
+  ggsave(file.path(heterogeneity_dir, "comprehensive_heterogeneity_index.pdf"), 
+         p17, width = 10, height = 6)
+  ggsave(file.path(heterogeneity_dir, "comprehensive_heterogeneity_index.png"), 
+         p17, width = 10, height = 6, dpi = 300)
+}
+
+# 清理内存
+gc()
+
+# =============================================================================
+# 步骤10：生成综合报告
+# =============================================================================
+cat("\n===== Step 10: Generating Comprehensive Report =====\n")
+
+# 创建最终摘要
+final_summary <- list(
+  "Sample_Statistics" = list(
+    Total_Epi7_BHI = sum(seurat_epi@meta.data$refined_celltype == "Epithelial_7" & 
+                        seurat_epi@meta.data$group == "BHI"),
+    Total_Epi7_PEA = sum(seurat_epi@meta.data$refined_celltype == "Epithelial_7" & 
+                        seurat_epi@meta.data$group == "PEA"),
+    Total_Epi13_BHI = sum(seurat_epi@meta.data$refined_celltype == "Epithelial_13" & 
+                         seurat_epi@meta.data$group == "BHI"),
+    Total_Epi13_PEA = sum(seurat_epi@meta.data$refined_celltype == "Epithelial_13" & 
+                         seurat_epi@meta.data$group == "PEA")
+  ),
+  
+  "Subcluster_Statistics" = list(
+    Epi7_Subclusters = length(unique(seurat_epi7$subcluster)),
+    Epi13_Subclusters = length(unique(seurat_epi13$subcluster))
+  ),
+  
+  "Heterogeneity_Metrics" = list(
+    Metrics_Calculated = c("Expression_CV", "Shannon_Entropy", "Euclidean_Distance", 
+                          "KNN_Distance", "Cell_Cycle_Diversity"),
+    Consensus_Genes_Used = length(consensus_genes)
+  ),
+  
+  "TF_Activity" = list(
+    TFs_Analyzed = names(tf_gene_sets_filtered),
+    Key_TFs = c("CDX2", "HNF4A", "NFE2L2", "ATF4", "NFKB", "POU2F3")
+  ),
+  
+  "Output_Files" = list(
+    Subclustering = list.files(subcluster_dir, pattern = "\\.csv$"),
+    Heterogeneity_Scores = list.files(heterogeneity_score_dir, pattern = "\\.csv$"),
+    TF_Activity = list.files(tf_activity_dir, pattern = "\\.csv$"),
+    Cell_Cycle = list.files(cell_cycle_dir, pattern = "\\.csv$"),
+    Entropy = list.files(entropy_dir, pattern = "\\.csv$"),
+    Pseudotime = list.files(pseudotime_dir, pattern = "\\.csv$")
+  )
+)
+
+# 保存报告
+sink(file.path(heterogeneity_dir, "analysis_summary_report.txt"))
+cat("=============================================================================\n")
+cat("Epi7 vs Epi13 Heterogeneity Analysis - Comprehensive Report\n")
+cat("=============================================================================\n\n")
+cat("Analysis Date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n\n")
+
+for (section_name in names(final_summary)) {
+  cat(sprintf("=== %s ===\n", section_name))
+  section_data <- final_summary[[section_name]]
+  
+  if (is.list(section_data)) {
+    for (item_name in names(section_data)) {
+      item_value <- section_data[[item_name]]
+      if (length(item_value) > 1) {
+        cat(sprintf("%s:\n", item_name))
+        for (v in item_value) {
+          cat(sprintf("  - %s\n", v))
+        }
+      } else {
+        cat(sprintf("%s: %s\n", item_name, item_value))
+      }
+    }
+  }
+  cat("\n")
+}
+
+cat("=============================================================================\n")
+cat("Key Findings:\n")
+cat("=============================================================================\n\n")
+
+# 异质性变化总结
+if (exists("comprehensive_heterogeneity")) {
+  cat("1. Heterogeneity Index Changes:\n")
+  for (ct in unique(comprehensive_heterogeneity$refined_celltype)) {
+    bhi_idx <- comprehensive_heterogeneity$heterogeneity_index[
+      comprehensive_heterogeneity$refined_celltype == ct & 
+      comprehensive_heterogeneity$group == "BHI"]
+    pea_idx <- comprehensive_heterogeneity$heterogeneity_index[
+      comprehensive_heterogeneity$refined_celltype == ct & 
+      comprehensive_heterogeneity$group == "PEA"]
+    
+    if (length(bhi_idx) > 0 && length(pea_idx) > 0) {
+      change <- ((pea_idx - bhi_idx) / bhi_idx) * 100
+      cat(sprintf("   %s: %.1f%% %s in PEA\n", 
+                 ct, abs(change), ifelse(change > 0, "increase", "decrease")))
+    }
+  }
+  cat("\n")
+}
+
+# 亚群变化
+cat("2. Subcluster Emergence:\n")
+cat(sprintf("   Epithelial_7: %d subclusters identified\n", 
+           length(unique(seurat_epi7$subcluster))))
+cat(sprintf("   Epithelial_13: %d subclusters identified\n", 
+           length(unique(seurat_epi13$subcluster))))
+cat("\n")
+
+# TF活性变化
+if (exists("tf_diff_tests")) {
+  sig_tf <- tf_diff_tests %>%
+    filter(significant == TRUE) %>%
+    arrange(wilcox_p)
+  
+  if (nrow(sig_tf) > 0) {
+    cat("3. Significant TF Activity Changes (p < 0.05):\n")
+    for (i in 1:min(5, nrow(sig_tf))) {
+      cat(sprintf("   %s in %s: %.2f-fold change (p=%.4f)\n",
+                 sig_tf$TF[i], sig_tf$refined_celltype[i],
+                 sig_tf$fold_change[i], sig_tf$wilcox_p[i]))
+    }
+  }
+}
+
+cat("\n=============================================================================\n")
+cat("Analysis Complete!\n")
+cat("=============================================================================\n")
+sink()
+
+# 保存Seurat对象
+saveRDS(seurat_epi, file.path(heterogeneity_dir, "seurat_epi_with_heterogeneity_scores.rds"))
+
+cat("\n=====================================\n")
+cat("===== Analysis Complete! =====\n")
+cat("=====================================\n\n")
+
+cat("Output directories:\n")
+cat(sprintf("  Main directory: %s\n", heterogeneity_dir))
+cat(sprintf("  - Subclustering: %s\n", subcluster_dir))
+cat(sprintf("  - Heterogeneity scores: %s\n", heterogeneity_score_dir))
+cat(sprintf("  - TF activity: %s\n", tf_activity_dir))
+cat(sprintf("  - Cell cycle: %s\n", cell_cycle_dir))
+cat(sprintf("  - Entropy analysis: %s\n", entropy_dir))
+cat(sprintf("  - Pseudotime density: %s\n", pseudotime_dir))
+
+cat("\nGenerated files:\n")
+cat("  - Multiple PDF and PNG plots\n")
+cat("  - CSV data tables\n")
+cat("  - Comprehensive summary report\n")
+cat("  - Annotated Seurat object with heterogeneity scores\n")
+
+# 最终内存清理
+gc()
+
+cat("\nAll analyses completed successfully!\n")
+```
+```{r}
+# 准备工作：记录开始时间
+start_time <- Sys.time()
+
+# 定义保存函数（如果还没定义）
+safe_save_plot <- function(plot_obj, filepath_base, width = 10, height = 8) {
+  tryCatch({
+    ggsave(paste0(filepath_base, ".pdf"), plot_obj, 
+           width = width, height = height, device = "pdf")
+    ggsave(paste0(filepath_base, ".png"), plot_obj, 
+           width = width, height = height, dpi = 300)
+    cat(sprintf("  ✓ Saved: %s\n", basename(filepath_base)))
+    return(TRUE)
+  }, error = function(e) {
+    cat(sprintf("  ✗ Error saving plot: %s\n", e$message))
+    return(FALSE)
+  })
+}
+
+safe_save_data <- function(data, filepath, row_names = FALSE) {
+  tryCatch({
+    write.csv(data, filepath, row.names = row_names)
+    cat(sprintf("  ✓ Saved: %s\n", basename(filepath)))
+    return(TRUE)
+  }, error = function(e) {
+    cat(sprintf("  ✗ Error saving data: %s\n", e$message))
+    return(FALSE)
+  })
+}
+
+```
+
+
+```{r}
+# =============================================================================
+# 清理内存
+# =============================================================================
+gc()
+select <- dplyr::select
+filter <- dplyr::filter
+rename <- dplyr::rename
+# =============================================================================
+# 步骤1：Tuft细胞基础特征分析（完整版）
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 1: Basic Characterization of Tuft Cells =====\n")
+cat("=====================================\n\n")
+
+# 1.1 经典Tuft标志基因表达
+cat("Analyzing classical Tuft marker genes...\n")
+
+tuft_markers <- c(
+  # 核心标记
+  "Dclk1", "Trpm5", "Gnat3", "Gng13", "Plcb2",
+  # 化学感受
+  "Tas1r3", "Tas2r108", "Tas2r138", "P2ry2",
+  # 免疫调节
+  "Il25", "Il13", "Il4ra", "Tslp",
+  # 脂质代谢
+  "Alox5", "Alox5ap", "Ptgs1", "Ptgs2",
+  # 转录因子
+  "Pou2f3", "Sox4", "Gfi1b", "Chat"
+)
+
+# 检查基因可用性
+available_markers <- intersect(tuft_markers, rownames(seurat_tuft))
+missing_markers <- setdiff(tuft_markers, rownames(seurat_tuft))
+
+cat(sprintf("Available markers: %d/%d\n", length(available_markers), length(tuft_markers)))
+if (length(missing_markers) > 0) {
+  cat("Missing markers:", paste(head(missing_markers, 5), collapse = ", "), "\n")
+}
+
+if (length(available_markers) == 0) {
+  cat("Warning: No Tuft marker genes found in the dataset!\n")
+} else {
+  # 提取标记基因表达
+  marker_expr <- as.data.frame(t(as.matrix(
+    GetAssayData(seurat_tuft, slot = "data")[available_markers, ]
+  )))
+  marker_expr$group <- seurat_tuft$group
+  marker_expr$cell_id <- rownames(marker_expr)
+  
+  # 计算平均表达
+  marker_summary <- marker_expr %>%
+    pivot_longer(cols = all_of(available_markers), 
+                 names_to = "Gene", 
+                 values_to = "Expression") %>%
+    group_by(Gene, group) %>%
+    summarise(
+      mean_expr = mean(Expression, na.rm = TRUE),
+      median_expr = median(Expression, na.rm = TRUE),
+      percent_expressed = sum(Expression > 0) / n() * 100,
+      sd_expr = sd(Expression, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  safe_save_data(marker_summary, 
+                 file.path(tuft_basic_dir, "tuft_marker_expression_summary.csv"))
+  
+  # 热图可视化标记基因表达
+  marker_heatmap_data <- marker_summary %>%
+    select(Gene, group, mean_expr) %>%
+    pivot_wider(names_from = group, values_from = mean_expr) %>%
+    column_to_rownames("Gene")
+  
+  pdf(file.path(tuft_basic_dir, "01_tuft_markers_heatmap.pdf"), width = 6, height = 10)
+  pheatmap(marker_heatmap_data,
+           scale = "row",
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           cluster_cols = FALSE,
+           main = "Tuft Cell Marker Expression",
+           fontsize = 10,
+           angle_col = "0")
+  dev.off()
+  
+  png(file.path(tuft_basic_dir, "01_tuft_markers_heatmap.png"), 
+      width = 6*100, height = 10*100, res = 100)
+  pheatmap(marker_heatmap_data,
+           scale = "row",
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           cluster_cols = FALSE,
+           main = "Tuft Cell Marker Expression",
+           fontsize = 10,
+           angle_col = "0")
+  dev.off()
+  
+  cat("  ✓ Saved marker expression heatmap\n")
+  
+  # 小提琴图展示关键标记
+  key_markers <- c("Dclk1", "Trpm5", "Il25", "Pou2f3", "Alox5")
+  available_key_markers <- intersect(key_markers, available_markers)
+  
+  if (length(available_key_markers) > 0) {
+    marker_plot_data <- marker_expr %>%
+      pivot_longer(cols = all_of(available_key_markers), 
+                   names_to = "Gene", 
+                   values_to = "Expression")
+    
+    p1 <- ggplot(marker_plot_data, aes(x = group, y = Expression, fill = group)) +
+      geom_violin(alpha = 0.7) +
+      geom_boxplot(width = 0.1) +
+      facet_wrap(~Gene, scales = "free_y", ncol = 3) +
+      scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+      stat_compare_means(method = "wilcox.test", label = "p.format") +
+      labs(title = "Key Tuft Marker Expression",
+           x = "Group", y = "Expression Level") +
+      theme_minimal() +
+      theme(legend.position = "top",
+            strip.text = element_text(face = "bold"))
+    
+    safe_save_plot(p1, file.path(tuft_basic_dir, "02_key_markers_violin"), 12, 8)
+  }
+}
+
+# 1.2 Tuft细胞质量控制指标
+cat("\nAnalyzing quality control metrics...\n")
+
+qc_stats <- seurat_tuft@meta.data %>%
+  group_by(group) %>%
+  summarise(
+    n_cells = n(),
+    mean_nCount_RNA = mean(nCount_RNA, na.rm = TRUE),
+    sd_nCount_RNA = sd(nCount_RNA, na.rm = TRUE),
+    mean_nFeature_RNA = mean(nFeature_RNA, na.rm = TRUE),
+    sd_nFeature_RNA = sd(nFeature_RNA, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+safe_save_data(qc_stats, file.path(tuft_basic_dir, "tuft_qc_statistics.csv"))
+
+cat("QC Statistics Summary:\n")
+print(qc_stats)
+
+# QC指标可视化
+qc_data <- seurat_tuft@meta.data %>%
+  select(group, nCount_RNA, nFeature_RNA) %>%
+  pivot_longer(cols = c(nCount_RNA, nFeature_RNA), 
+               names_to = "Metric", 
+               values_to = "Value")
+
+p2 <- ggplot(qc_data, aes(x = group, y = Value, fill = group)) +
+  geom_violin(alpha = 0.7) +
+  geom_boxplot(width = 0.1) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  stat_compare_means(method = "wilcox.test", label = "p.format") +
+  labs(title = "Tuft Cell Quality Control Metrics",
+       x = "Group", y = "Value") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+safe_save_plot(p2, file.path(tuft_basic_dir, "03_qc_metrics"), 10, 5)
+
+cat("✓ Step 1 completed\n")
+gc()
+
+# =============================================================================
+# 步骤2：Tuft细胞亚群分析
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 2: Tuft Cell Subpopulation Analysis =====\n")
+cat("=====================================\n\n")
+
+cat("Performing fine-grained clustering of Tuft cells...\n")
+
+# 检查细胞数量是否足够进行聚类
+if (ncol(seurat_tuft) < 20) {
+  cat("Warning: Too few Tuft cells (", ncol(seurat_tuft), ") for meaningful clustering\n")
+  cat("Skipping subcluster analysis\n")
+  seurat_tuft$tuft_subcluster <- "Tuft_all"
+} else {
+  # 标准化和降维
+  seurat_tuft <- NormalizeData(seurat_tuft, verbose = FALSE)
+  seurat_tuft <- FindVariableFeatures(seurat_tuft, nfeatures = 2000, verbose = FALSE)
+  seurat_tuft <- ScaleData(seurat_tuft, verbose = FALSE)
+  seurat_tuft <- RunPCA(seurat_tuft, npcs = 30, verbose = FALSE)
+  
+  # 确定最佳PC数量
+  pct_variance <- seurat_tuft@reductions$pca@stdev^2 / sum(seurat_tuft@reductions$pca@stdev^2)
+  cumsum_pct <- cumsum(pct_variance)
+  optimal_pcs <- which(cumsum_pct > 0.9)[1]
+  optimal_pcs <- min(optimal_pcs, 20, na.rm = TRUE)
+  
+  cat(sprintf("Using %d PCs for clustering\n", optimal_pcs))
+  
+  # 尝试聚类
+  seurat_tuft <- FindNeighbors(seurat_tuft, dims = 1:optimal_pcs, verbose = FALSE)
+  seurat_tuft <- FindClusters(seurat_tuft, resolution = 0.3, verbose = FALSE)
+  seurat_tuft <- RunUMAP(seurat_tuft, dims = 1:optimal_pcs, verbose = FALSE)
+  
+  seurat_tuft$tuft_subcluster <- paste0("Tuft_sub", seurat_tuft$seurat_clusters)
+  
+  cat(sprintf("Identified %d subclusters\n", length(unique(seurat_tuft$tuft_subcluster))))
+  
+  # 可视化亚群
+  p3 <- DimPlot(seurat_tuft, group.by = "tuft_subcluster", split.by = "group", 
+                label = TRUE, repel = TRUE) +
+    scale_color_brewer(palette = "Set2") +
+    labs(title = "Tuft Cell Subclusters") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  safe_save_plot(p3, file.path(tuft_subcluster_dir, "01_tuft_subclusters_umap"), 12, 6)
+  
+  # 亚群分布统计
+  subcluster_stats <- seurat_tuft@meta.data %>%
+    group_by(group, tuft_subcluster) %>%
+    summarise(count = n(), .groups = 'drop') %>%
+    group_by(group) %>%
+    mutate(percentage = count / sum(count) * 100)
+  
+  safe_save_data(subcluster_stats, 
+                 file.path(tuft_subcluster_dir, "tuft_subcluster_distribution.csv"))
+  
+  p4 <- ggplot(subcluster_stats, aes(x = tuft_subcluster, y = percentage, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+              position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "Tuft Cell Subcluster Distribution",
+         x = "Subcluster", y = "Percentage (%)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "top")
+  
+  safe_save_plot(p4, file.path(tuft_subcluster_dir, "02_subcluster_distribution"), 10, 6)
+  
+  # 寻找亚群标志基因（如果有多个亚群）
+  if (length(unique(seurat_tuft$tuft_subcluster)) > 1) {
+    cat("Finding subcluster marker genes...\n")
+    Idents(seurat_tuft) <- "tuft_subcluster"
+    
+    tryCatch({
+      subcluster_markers <- FindAllMarkers(seurat_tuft, 
+                                           only.pos = TRUE, 
+                                           min.pct = 0.25,
+                                           logfc.threshold = 0.25,
+                                           verbose = FALSE)
+      
+      if (nrow(subcluster_markers) > 0) {
+        safe_save_data(subcluster_markers, 
+                       file.path(tuft_subcluster_dir, "tuft_subcluster_markers.csv"))
+        
+        top_markers <- subcluster_markers %>%
+          group_by(cluster) %>%
+          slice_max(order_by = avg_log2FC, n = 10)
+        
+        safe_save_data(top_markers, 
+                       file.path(tuft_subcluster_dir, "tuft_subcluster_top_markers.csv"))
+        
+        cat(sprintf("  ✓ Found %d marker genes\n", nrow(subcluster_markers)))
+      }
+    }, error = function(e) {
+      cat(sprintf("  ✗ Error finding markers: %s\n", e$message))
+    })
+  }
+}
+
+cat("✓ Step 2 completed\n")
+gc()
+
+# =============================================================================
+# 步骤3：Tuft细胞功能模块分析
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 3: Functional Module Analysis =====\n")
+cat("=====================================\n\n")
+
+# 定义功能模块
+tuft_functional_modules <- list(
+  Chemosensing = c("Tas1r3", "Tas2r108", "Tas2r138", "Tas2r143", "Trpm5", 
+                  "Gnat3", "Gng13", "Plcb2", "P2ry2", "P2rx7"),
+  Immune_Regulation = c("Il25", "Il13", "Il4", "Il4ra", "Il13ra1", "Tslp", 
+                       "Csf2", "Ccl20", "Cxcl1", "Cxcl2"),
+  Lipid_Mediators = c("Alox5", "Alox5ap", "Alox15", "Ptgs1", "Ptgs2", 
+                     "Ptges", "Hpgds", "Ltc4s", "Cysltr1"),
+  Neuropeptide_Signaling = c("Chat", "Ache", "Slc18a3", "Chrna7", "Adcyap1", 
+                             "Vip", "Sst", "Tac1"),
+  Metabolic_Reprogramming = c("Hk2", "Pfkl", "Ldha", "Pkm", "G6pd", "Tkt", 
+                              "Fasn", "Acaca", "Scd1"),
+  Epithelial_Homeostasis = c("Cdh1", "Krt8", "Krt18", "Krt19", "Epcam", 
+                            "Cldn4", "Ocln", "Tjp1"),
+  Oxidative_Stress_Response = c("Sod1", "Sod2", "Cat", "Gpx1", "Gpx4", 
+                                "Nfe2l2", "Hmox1", "Nqo1"),
+  Proliferation_Survival = c("Mki67", "Pcna", "Ccnd1", "Myc", "Bcl2", 
+                            "Bcl2l1", "Mcl1", "Birc5")
+)
+
+# 计算模块评分
+cat("Calculating functional module scores...\n")
+module_cols <- c()
+
+for (module_name in names(tuft_functional_modules)) {
+  module_genes <- intersect(tuft_functional_modules[[module_name]], 
+                           rownames(seurat_tuft))
+  
+  if (length(module_genes) >= 3) {
+    cat(sprintf("  %s: %d/%d genes\n", 
+               module_name, length(module_genes), 
+               length(tuft_functional_modules[[module_name]])))
+    
+    seurat_tuft <- AddModuleScore(seurat_tuft,
+                                  features = list(module_genes),
+                                  name = paste0("Tuft_", module_name),
+                                  seed = 123)
+    
+    old_col <- paste0("Tuft_", module_name, "1")
+    new_col <- paste0("Tuft_", module_name)
+    if (old_col %in% colnames(seurat_tuft@meta.data)) {
+      colnames(seurat_tuft@meta.data)[colnames(seurat_tuft@meta.data) == old_col] <- new_col
+      module_cols <- c(module_cols, new_col)
+    }
+  }
+}
+
+cat(sprintf("✓ Calculated %d module scores\n", length(module_cols)))
+
+if (length(module_cols) > 0) {
+  # 统计
+  module_stats <- seurat_tuft@meta.data %>%
+    select(group, all_of(module_cols)) %>%
+    pivot_longer(cols = all_of(module_cols), 
+                 names_to = "Module", 
+                 values_to = "Score") %>%
+    group_by(group, Module) %>%
+    summarise(
+      mean_score = mean(Score, na.rm = TRUE),
+      median_score = median(Score, na.rm = TRUE),
+      sd_score = sd(Score, na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    mutate(Module = gsub("Tuft_", "", Module))
+  
+  safe_save_data(module_stats, 
+                 file.path(tuft_function_dir, "functional_module_statistics.csv"))
+  
+  # 可视化
+  p5 <- ggplot(module_stats, aes(x = Module, y = mean_score, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_errorbar(aes(ymin = mean_score - sd_score, ymax = mean_score + sd_score),
+                  position = position_dodge(0.9), width = 0.25) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "Tuft Cell Functional Module Activity",
+         x = "Functional Module", y = "Mean Module Score") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "top")
+  
+  safe_save_plot(p5, file.path(tuft_function_dir, "01_functional_modules_barplot"), 12, 6)
+  
+  # 热图
+  module_heatmap_data <- module_stats %>%
+    select(group, Module, mean_score) %>%
+    pivot_wider(names_from = group, values_from = mean_score) %>%
+    column_to_rownames("Module")
+  
+  pdf(file.path(tuft_function_dir, "02_functional_modules_heatmap.pdf"), width = 8, height = 6)
+  pheatmap(module_heatmap_data,
+           scale = "row",
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           cluster_cols = FALSE,
+           main = "Tuft Functional Module Activity",
+           fontsize = 10,
+           angle_col = "0")
+  dev.off()
+  
+  png(file.path(tuft_function_dir, "02_functional_modules_heatmap.png"), 
+      width = 8*100, height = 6*100, res = 100)
+  pheatmap(module_heatmap_data,
+           scale = "row",
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           cluster_cols = FALSE,
+           main = "Tuft Functional Module Activity",
+           fontsize = 10,
+           angle_col = "0")
+  dev.off()
+  
+  cat("  ✓ Saved module heatmap\n")
+  
+  # 统计检验
+  cat("\nPerforming statistical tests...\n")
+  module_tests <- data.frame()
+  
+  for (module in module_cols) {
+    bhi_scores <- seurat_tuft@meta.data[seurat_tuft@meta.data$group == "BHI", module]
+    pea_scores <- seurat_tuft@meta.data[seurat_tuft@meta.data$group == "PEA", module]
+    
+    bhi_scores <- bhi_scores[!is.na(bhi_scores)]
+    pea_scores <- pea_scores[!is.na(pea_scores)]
+    
+    if (length(bhi_scores) >= 3 && length(pea_scores) >= 3) {
+      test_result <- wilcox.test(pea_scores, bhi_scores)
+      mean_bhi <- mean(bhi_scores)
+      mean_pea <- mean(pea_scores)
+      
+      module_tests <- rbind(module_tests, data.frame(
+        Module = gsub("Tuft_", "", module),
+        mean_BHI = mean_bhi,
+        mean_PEA = mean_pea,
+        fold_change = mean_pea / (mean_bhi + 1e-10),
+        wilcox_p = test_result$p.value,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  if (nrow(module_tests) > 0) {
+    module_tests$p_adj <- p.adjust(module_tests$wilcox_p, method = "BH")
+    module_tests$significant <- module_tests$p_adj < 0.05
+    module_tests$direction <- ifelse(module_tests$fold_change > 1, "Upregulated", "Downregulated")
+    
+    safe_save_data(module_tests, 
+                   file.path(tuft_function_dir, "functional_module_tests.csv"))
+    
+    cat(sprintf("  ✓ %d/%d modules significantly different\n", 
+               sum(module_tests$significant), nrow(module_tests)))
+  }
+  
+  # 相关性分析
+  if (length(module_cols) > 1) {
+    module_cor_data <- seurat_tuft@meta.data[, module_cols]
+    colnames(module_cor_data) <- gsub("Tuft_", "", colnames(module_cor_data))
+    cor_matrix <- cor(module_cor_data, use = "complete.obs")
+    
+    pdf(file.path(tuft_function_dir, "03_module_correlation.pdf"), width = 10, height = 10)
+    corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black",
+             tl.srt = 45, addCoef.col = "black", number.cex = 0.7,
+             title = "Module Correlations", mar = c(0,0,2,0))
+    dev.off()
+    
+    png(file.path(tuft_function_dir, "03_module_correlation.png"), 
+        width = 10*100, height = 10*100, res = 100)
+    corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black",
+             tl.srt = 45, addCoef.col = "black", number.cex = 0.7,
+             title = "Module Correlations", mar = c(0,0,2,0))
+    dev.off()
+    
+    cat("  ✓ Saved correlation plot\n")
+  }
+}
+
+cat("✓ Step 3 completed\n")
+gc()
+
+# =============================================================================
+# 步骤4：细胞互作分析（替代方法）
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 4: Cell Interaction Analysis (Alternative Method) =====\n")
+cat("=====================================\n\n")
+
+# 使用配体-受体表达分析
+lr_pairs <- data.frame(
+  ligand = c("Il25", "Il13", "Tslp", "Csf2", "Ccl20", "Cxcl1", "Cxcl2",
+             "Egf", "Tgfb1", "Bmp2", "Bmp4", "Wnt3a", "Wnt5a"),
+  receptor = c("Il17rb", "Il13ra1", "Crlf2", "Csf2rb", "Ccr6", "Cxcr2", "Cxcr2",
+              "Egfr", "Tgfbr1", "Bmpr1a", "Bmpr1a", "Fzd1", "Fzd5"),
+  pathway = c("IL25", "IL13", "TSLP", "CSF", "Chemokine", "Chemokine", "Chemokine",
+             "EGF", "TGFb", "BMP", "BMP", "WNT", "WNT"),
+  stringsAsFactors = FALSE
+)
+
+available_ligands <- intersect(lr_pairs$ligand, rownames(seurat_tuft))
+
+if (length(available_ligands) > 0) {
+  cat(sprintf("Analyzing %d ligands in Tuft cells...\n", length(available_ligands)))
+  
+  ligand_expr <- as.data.frame(t(as.matrix(
+    GetAssayData(seurat_tuft, slot = "data")[available_ligands, ]
+  )))
+  ligand_expr$group <- seurat_tuft$group
+  
+  ligand_summary <- ligand_expr %>%
+    pivot_longer(cols = all_of(available_ligands), 
+                 names_to = "Ligand", 
+                 values_to = "Expression") %>%
+    group_by(group, Ligand) %>%
+    summarise(
+      mean_expr = mean(Expression, na.rm = TRUE),
+      pct_expressed = sum(Expression > 0) / n() * 100,
+      .groups = 'drop'
+    ) %>%
+    left_join(lr_pairs, by = c("Ligand" = "ligand"))
+  
+  safe_save_data(ligand_summary, 
+                 file.path(tuft_interaction_dir, "tuft_ligand_expression.csv"))
+  
+  p6 <- ggplot(ligand_summary, aes(x = Ligand, y = mean_expr, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "Ligand Expression in Tuft Cells",
+         x = "Ligand", y = "Mean Expression") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "top")
+  
+  safe_save_plot(p6, file.path(tuft_interaction_dir, "01_tuft_ligand_expression"), 10, 6)
+  
+  cat("  ✓ Analyzed ligand expression\n")
+}
+
+cat("✓ Step 4 completed\n")
+gc()
+
+# =============================================================================
+# 步骤5：轨迹分析（有限数据版）
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 5: Trajectory Analysis =====\n")
+cat("=====================================\n\n")
+
+if (nrow(trajectory_tuft) >= 10) {
+  cat("Performing trajectory analysis...\n")
+  
+  # 伪时间分布
+  tuft_pseudotime_stats <- trajectory_tuft %>%
+    group_by(group) %>%
+    summarise(
+      n_cells = n(),
+      mean_pseudotime = mean(pseudotime, na.rm = TRUE),
+      median_pseudotime = median(pseudotime, na.rm = TRUE),
+      sd_pseudotime = sd(pseudotime, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  safe_save_data(tuft_pseudotime_stats, 
+                 file.path(tuft_trajectory_dir, "tuft_pseudotime_statistics.csv"))
+  
+  p7 <- ggplot(trajectory_tuft, aes(x = pseudotime, fill = group)) +
+    geom_density(alpha = 0.6) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "Tuft Cell Pseudotime Distribution",
+         x = "Pseudotime", y = "Density") +
+    theme_minimal()
+  
+  safe_save_plot(p7, file.path(tuft_trajectory_dir, "01_tuft_pseudotime_density"), 10, 6)
+  
+  cat("  ✓ Completed trajectory analysis\n")
+} else {
+  cat(sprintf("Insufficient trajectory data (%d cells) - skipping trajectory analysis\n", 
+             nrow(trajectory_tuft)))
+  writeLines(
+    c("Trajectory Analysis - Insufficient Data",
+      "",
+      sprintf("Only %d Tuft cells were found in the trajectory data.", nrow(trajectory_tuft)),
+      "This is insufficient for meaningful trajectory analysis.",
+      "",
+      "Possible reasons:",
+      "1. Tuft cells may not have been included in the trajectory analysis",
+      "2. Trajectory analysis may have filtered out most Tuft cells",
+      "3. The trajectory may focus on epithelial differentiation only",
+      "",
+      "Recommendation: Re-run trajectory analysis including Tuft cells if needed."),
+    file.path(tuft_trajectory_dir, "README_insufficient_data.txt")
+  )
+}
+
+cat("✓ Step 5 completed\n")
+gc()
+
+# =============================================================================
+# 步骤6：差异表达和特征基因分析
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 6: Differential Expression and Signature Genes =====\n")
+cat("=====================================\n\n")
+
+# 6.1 Tuft vs 上皮细胞
+cat("Finding Tuft-specific genes vs epithelial cells...\n")
+
+seurat_comparison <- subset(seurat_pure, 
+                           refined_celltype %in% c("Epithelial_7", "Epithelial_13", "Tuft_30"))
+Idents(seurat_comparison) <- "refined_celltype"
+
+tryCatch({
+  tuft_specific_markers <- FindMarkers(seurat_comparison,
+                                      ident.1 = "Tuft_30",
+                                      ident.2 = c("Epithelial_7", "Epithelial_13"),
+                                      only.pos = TRUE,
+                                      min.pct = 0.25,
+                                      logfc.threshold = 0.5,
+                                      verbose = FALSE)
+  
+  if (nrow(tuft_specific_markers) > 0) {
+    tuft_specific_markers$gene <- rownames(tuft_specific_markers)
+    tuft_specific_markers <- tuft_specific_markers %>%
+      arrange(desc(avg_log2FC))
+    
+    safe_save_data(tuft_specific_markers, 
+                   file.path(tuft_signature_dir, "tuft_specific_markers.csv"))
+    
+    cat(sprintf("  ✓ Found %d Tuft-specific genes\n", nrow(tuft_specific_markers)))
+    
+    # Top genes
+    top_tuft_genes <- head(tuft_specific_markers, 50)
+    safe_save_data(top_tuft_genes, 
+                   file.path(tuft_signature_dir, "top50_tuft_specific_genes.csv"))
+    
+    # 热图（如果有足够的基因）
+    if (nrow(tuft_specific_markers) >= 20) {
+      top20_genes <- head(tuft_specific_markers$gene, 20)
+      
+      pdf(file.path(tuft_signature_dir, "01_top_tuft_markers_heatmap.pdf"), 
+          width = 8, height = 10)
+      DoHeatmap(seurat_comparison, features = top20_genes, 
+                group.by = "refined_celltype") +
+        scale_fill_gradientn(colors = c("blue", "white", "red"))
+      dev.off()
+      
+      png(file.path(tuft_signature_dir, "01_top_tuft_markers_heatmap.png"), 
+          width = 8*100, height = 10*100, res = 100)
+      DoHeatmap(seurat_comparison, features = top20_genes, 
+                group.by = "refined_celltype") +
+        scale_fill_gradientn(colors = c("blue", "white", "red"))
+      dev.off()
+      
+      cat("  ✓ Saved Tuft-specific marker heatmap\n")
+    }
+  }
+}, error = function(e) {
+  cat(sprintf("  ✗ Error: %s\n", e$message))
+})
+
+# 6.2 Tuft中BHI vs PEA
+cat("\nFinding DEGs in Tuft cells: PEA vs BHI...\n")
+
+Idents(seurat_tuft) <- "group"
+
+tryCatch({
+  tuft_deg <- FindMarkers(seurat_tuft,
+                         ident.1 = "PEA",
+                         ident.2 = "BHI",
+                         min.pct = 0.1,
+                         logfc.threshold = 0.25,
+                         verbose = FALSE)
+  
+  if (nrow(tuft_deg) > 0) {
+    tuft_deg$gene <- rownames(tuft_deg)
+    tuft_deg <- tuft_deg %>%
+      mutate(
+        regulation = case_when(
+          p_val_adj < 0.05 & avg_log2FC > 0.5 ~ "Upregulated",
+          p_val_adj < 0.05 & avg_log2FC < -0.5 ~ "Downregulated",
+          TRUE ~ "Not significant"
+        )
+      ) %>%
+      arrange(p_val_adj)
+    
+    safe_save_data(tuft_deg, 
+                   file.path(tuft_signature_dir, "tuft_deg_PEA_vs_BHI.csv"))
+    
+    # 统计
+    deg_summary <- tuft_deg %>%
+      filter(p_val_adj < 0.05, abs(avg_log2FC) > 0.5) %>%
+      group_by(regulation) %>%
+      summarise(count = n(), .groups = 'drop')
+    
+    cat("\nDEG Summary:\n")
+    print(deg_summary)
+    
+    # 火山图
+    p8 <- ggplot(tuft_deg, aes(x = avg_log2FC, y = -log10(p_val_adj + 1e-300))) +
+      geom_point(aes(color = regulation), alpha = 0.6) +
+      scale_color_manual(values = c("Upregulated" = "#E59693", 
+                                    "Downregulated" = "#78A9cd",
+                                    "Not significant" = "grey")) +
+      geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+      geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "red") +
+      labs(title = "Tuft Cell DEGs: PEA vs BHI",
+           x = "Log2 Fold Change", y = "-Log10(Adjusted P-value)") +
+      theme_minimal()
+    
+    safe_save_plot(p8, file.path(tuft_signature_dir, "02_tuft_deg_volcano"), 10, 8)
+    
+    cat(sprintf("  ✓ Found %d DEGs\n", nrow(deg_summary)))
+  }
+}, error = function(e) {
+  cat(sprintf("  ✗ Error: %s\n", e$message))
+})
+
+cat("✓ Step 6 completed\n")
+gc()
+
+# =============================================================================
+# 步骤7：与上皮细胞比较
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 7: Comparison with Epithelial Cells =====\n")
+cat("=====================================\n\n")
+
+# 细胞数量对比
+cell_count_comparison <- seurat_pure@meta.data %>%
+  filter(refined_celltype %in% c("Epithelial_7", "Epithelial_13", "Tuft_30")) %>%
+  group_by(refined_celltype, group) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(group) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+safe_save_data(cell_count_comparison, 
+               file.path(tuft_comparison_dir, "cell_count_comparison.csv"))
+
+p9 <- ggplot(cell_count_comparison, 
+            aes(x = refined_celltype, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_dodge(width = 0.9), vjust = -0.5) +
+  scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+  labs(title = "Cell Type Proportion Comparison",
+       x = "Cell Type", y = "Percentage (%)") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+safe_save_plot(p9, file.path(tuft_comparison_dir, "01_cell_proportion_comparison"), 10, 6)
+
+# 转录组相似性
+cat("Calculating transcriptome similarity...\n")
+
+comparison_cells <- subset(seurat_pure, 
+                          refined_celltype %in% c("Epithelial_7", "Epithelial_13", "Tuft_30"))
+
+# 使用AggregateExpression（Seurat v5推荐）
+avg_expr_by_type <- AggregateExpression(
+  comparison_cells, 
+  group.by = c("refined_celltype", "group"),
+  slot = "data",
+  return.seurat = FALSE
+)$RNA
+
+# 确保是矩阵格式
+if (!is.matrix(avg_expr_by_type)) {
+  avg_expr_by_type <- as.matrix(avg_expr_by_type)
+}
+
+# 检查并处理NA值
+avg_expr_by_type[is.na(avg_expr_by_type)] <- 0
+
+# 计算相关性
+cor_matrix_types <- cor(avg_expr_by_type)
+
+pdf(file.path(tuft_comparison_dir, "02_transcriptome_similarity.pdf"), 
+    width = 10, height = 10)
+pheatmap(cor_matrix_types,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(0.5, 1, length.out = 101),
+         display_numbers = TRUE,
+         number_format = "%.3f",
+         fontsize_number = 8,
+         main = "Transcriptome Similarity",
+         angle_col = "45")
+dev.off()
+
+png(file.path(tuft_comparison_dir, "02_transcriptome_similarity.png"), 
+    width = 10*100, height = 10*100, res = 100)
+pheatmap(cor_matrix_types,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         breaks = seq(0.5, 1, length.out = 101),
+         display_numbers = TRUE,
+         number_format = "%.3f",
+         fontsize_number = 8,
+         main = "Transcriptome Similarity",
+         angle_col = "45")
+dev.off()
+
+cat("  ✓ Saved similarity matrix\n")
+
+cat("✓ Step 7 completed\n")
+gc()
+
+# =============================================================================
+# 步骤8：机制分析和通路富集
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 8: Mechanism and Pathway Analysis =====\n")
+cat("=====================================\n\n")
+
+if (exists("tuft_deg") && nrow(tuft_deg) > 0) {
+  # 上调基因
+  up_genes <- tuft_deg %>%
+    filter(p_val_adj < 0.05, avg_log2FC > 0.5) %>%
+    pull(gene)
+  
+  # 下调基因
+  down_genes <- tuft_deg %>%
+    filter(p_val_adj < 0.05, avg_log2FC < -0.5) %>%
+    pull(gene)
+  
+  cat(sprintf("Upregulated genes: %d\n", length(up_genes)))
+  cat(sprintf("Downregulated genes: %d\n", length(down_genes)))
+  
+  # GO富集 - 上调
+  if (length(up_genes) >= 10) {
+    cat("\nPerforming GO enrichment for upregulated genes...\n")
+    tryCatch({
+      go_up <- enrichGO(gene = up_genes,
+                       OrgDb = org.Mm.eg.db,
+                       keyType = "SYMBOL",
+                       ont = "BP",
+                       pAdjustMethod = "BH",
+                       pvalueCutoff = 0.05,
+                       qvalueCutoff = 0.05)
+      
+      if (!is.null(go_up) && nrow(as.data.frame(go_up)) > 0) {
+        safe_save_data(as.data.frame(go_up), 
+                       file.path(tuft_mechanism_dir, "tuft_upregulated_GO_BP.csv"))
+        
+        p10 <- dotplot(go_up, showCategory = 20) +
+          labs(title = "GO Enrichment: Upregulated Genes (PEA)")
+        
+        safe_save_plot(p10, file.path(tuft_mechanism_dir, "01_upregulated_GO_dotplot"), 12, 10)
+        
+        cat("  ✓ GO enrichment completed\n")
+      }
+    }, error = function(e) {
+      cat(sprintf("  ✗ GO enrichment failed: %s\n", e$message))
+    })
+  }
+  
+  # KEGG富集 - 上调
+  if (length(up_genes) >= 5) {
+    cat("\nPerforming KEGG enrichment for upregulated genes...\n")
+    tryCatch({
+      up_entrez <- mapIds(org.Mm.eg.db, keys = up_genes, 
+                         column = "ENTREZID", keytype = "SYMBOL", 
+                         multiVals = "first")
+      up_entrez <- up_entrez[!is.na(up_entrez)]
+      
+      if (length(up_entrez) >= 5) {
+        kegg_up <- enrichKEGG(gene = up_entrez,
+                             organism = 'mmu',
+                             pvalueCutoff = 0.05,
+                             qvalueCutoff = 0.05)
+        
+        if (!is.null(kegg_up) && nrow(as.data.frame(kegg_up)) > 0) {
+          safe_save_data(as.data.frame(kegg_up), 
+                         file.path(tuft_mechanism_dir, "tuft_upregulated_KEGG.csv"))
+          
+          p11 <- dotplot(kegg_up, showCategory = 20) +
+            labs(title = "KEGG Enrichment: Upregulated Genes (PEA)")
+          
+          safe_save_plot(p11, file.path(tuft_mechanism_dir, "02_upregulated_KEGG_dotplot"), 12, 10)
+          
+          cat("  ✓ KEGG enrichment completed\n")
+        }
+      }
+    }, error = function(e) {
+      cat(sprintf("  ✗ KEGG enrichment failed: %s\n", e$message))
+    })
+  }
+}
+
+cat("✓ Step 8 completed\n")
+gc()
+
+# =============================================================================
+# 步骤9：α-synuclein关联分析
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 9: α-Synuclein Association Analysis =====\n")
+cat("=====================================\n\n")
+
+synuclein_genes <- c(
+  "Snca", "Sncb", "Sncg",
+  "Ube2n", "Stub1", "Hspa8", "Lamp2a", "Ctsd", "Becn1", "Atg5", "Atg7",
+  "Hspa1a", "Hspa1b", "Hsp90aa1", "Atf4", "Xbp1", "Nfe2l2",
+  "Pink1", "Park2", "Mfn2", "Opa1"
+)
+
+available_syn_genes <- intersect(synuclein_genes, rownames(seurat_tuft))
+
+if (length(available_syn_genes) > 0) {
+  cat(sprintf("Analyzing %d α-synuclein related genes...\n", length(available_syn_genes)))
+  
+  syn_expr <- as.data.frame(t(as.matrix(
+    GetAssayData(seurat_tuft, slot = "data")[available_syn_genes, ]
+  )))
+  syn_expr$group <- seurat_tuft$group
+  
+  syn_summary <- syn_expr %>%
+    pivot_longer(cols = all_of(available_syn_genes), 
+                 names_to = "Gene", 
+                 values_to = "Expression") %>%
+    group_by(Gene, group) %>%
+    summarise(
+      mean_expr = mean(Expression, na.rm = TRUE),
+      percent_expressed = sum(Expression > 0) / n() * 100,
+      .groups = 'drop'
+    )
+  
+  safe_save_data(syn_summary, 
+                 file.path(tuft_mechanism_dir, "synuclein_genes_in_tuft.csv"))
+  
+  p12 <- ggplot(syn_summary, aes(x = Gene, y = mean_expr, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    labs(title = "α-Synuclein Related Genes in Tuft Cells",
+         x = "Gene", y = "Mean Expression") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "top")
+  
+  safe_save_plot(p12, file.path(tuft_mechanism_dir, "03_synuclein_genes_expression"), 12, 6)
+  
+  # 模块评分
+  seurat_tuft <- AddModuleScore(seurat_tuft,
+                                features = list(available_syn_genes),
+                                name = "Synuclein_Module",
+                                seed = 123)
+  
+  if ("Synuclein_Module1" %in% colnames(seurat_tuft@meta.data)) {
+    colnames(seurat_tuft@meta.data)[
+      colnames(seurat_tuft@meta.data) == "Synuclein_Module1"
+    ] <- "Synuclein_Module"
+  }
+  
+  p13 <- ggplot(seurat_tuft@meta.data, 
+                aes(x = group, y = Synuclein_Module, fill = group)) +
+    geom_violin(alpha = 0.7) +
+    geom_boxplot(width = 0.1) +
+    scale_fill_manual(values = c("BHI" = "#78A9cd", "PEA" = "#E59693")) +
+    stat_compare_means(method = "wilcox.test", label = "p.format") +
+    labs(title = "α-Synuclein Module Score in Tuft Cells",
+         x = "Group", y = "Module Score") +
+    theme_minimal()
+  
+  safe_save_plot(p13, file.path(tuft_mechanism_dir, "04_synuclein_module_score"), 8, 6)
+  
+  cat("  ✓ α-synuclein analysis completed\n")
+}
+
+cat("✓ Step 9 completed\n")
+gc()
+
+# =============================================================================
+# 步骤10：生成综合报告
+# =============================================================================
+cat("\n=====================================\n")
+cat("===== Step 10: Generating Comprehensive Report =====\n")
+cat("=====================================\n\n")
+
+# 计算关键统计
+tuft_bhi <- sum(seurat_tuft$group == "BHI")
+tuft_pea <- sum(seurat_tuft$group == "PEA")
+fold_change <- tuft_pea / tuft_bhi
+
+# 创建摘要报告
+sink(file.path(tuft_dir, "tuft_comprehensive_analysis_report.txt"))
+cat("=============================================================================\n")
+cat("Tuft Cell Comprehensive Analysis Report\n")
+cat("=============================================================================\n\n")
+cat("Analysis Date:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n\n")
+
+cat("=== 1. Basic Statistics ===\n")
+cat(sprintf("Total Tuft Cells: %d\n", ncol(seurat_tuft)))
+cat(sprintf("BHI Group: %d cells (%.1f%%)\n", tuft_bhi, tuft_bhi/ncol(seurat_tuft)*100))
+cat(sprintf("PEA Group: %d cells (%.1f%%)\n", tuft_pea, tuft_pea/ncol(seurat_tuft)*100))
+cat(sprintf("Fold Change (PEA/BHI): %.2f\n\n", fold_change))
+
+cat("=== 2. Marker Gene Expression ===\n")
+if (length(available_markers) > 0) {
+  cat(sprintf("Classical markers analyzed: %d/%d\n", 
+             length(available_markers), length(tuft_markers)))
+  cat("Key markers:", paste(head(available_markers, 5), collapse = ", "), "\n\n")
+} else {
+  cat("No classical markers found\n\n")
+}
+
+cat("=== 3. Subcluster Analysis ===\n")
+cat(sprintf("Number of subclusters: %d\n\n", length(unique(seurat_tuft$tuft_subcluster))))
+
+cat("=== 4. Functional Modules ===\n")
+cat(sprintf("Modules analyzed: %d\n", length(module_cols)))
+if (exists("module_tests") && nrow(module_tests) > 0) {
+  cat(sprintf("Significantly different modules: %d\n\n", sum(module_tests$significant)))
+} else {
+  cat("\n")
+}
+
+cat("=== 5. Differential Expression ===\n")
+if (exists("tuft_deg") && nrow(tuft_deg) > 0) {
+  sig_deg <- tuft_deg %>% filter(p_val_adj < 0.05, abs(avg_log2FC) > 0.5)
+  cat(sprintf("Total DEGs: %d\n", nrow(sig_deg)))
+  cat(sprintf("Upregulated: %d\n", sum(sig_deg$avg_log2FC > 0)))
+  cat(sprintf("Downregulated: %d\n\n", sum(sig_deg$avg_log2FC < 0)))
+} else {
+  cat("DEG analysis not completed\n\n")
+}
+
+cat("=== 6. Key Findings ===\n\n")
+
+if (fold_change > 1.5) {
+  cat("1. EXPANSION in PEA condition:\n")
+  cat("   - Tuft cells show significant expansion\n")
+  cat("   - May indicate enhanced chemosensory surveillance\n")
+  cat("   - Potential immune regulatory response\n\n")
+} else if (fold_change < 0.67) {
+  cat("1. REDUCTION in PEA condition:\n")
+  cat("   - Tuft cells show reduction\n")
+  cat("   - May indicate cell loss or transdifferentiation\n\n")
+} else {
+  cat("1. STABLE population in PEA condition:\n")
+  cat("   - Tuft cells maintain homeostatic balance\n\n")
+}
+
+if (exists("module_tests") && nrow(module_tests) > 0) {
+  sig_modules <- module_tests %>% filter(significant == TRUE)
+  if (nrow(sig_modules) > 0) {
+    cat("2. Altered functional modules:\n")
+    for (i in 1:min(3, nrow(sig_modules))) {
+      cat(sprintf("   - %s: %.2f-fold %s\n",
+                 sig_modules$Module[i],
+                 abs(sig_modules$fold_change[i]),
+                 sig_modules$direction[i]))
+    }
+    cat("\n")
+  }
+}
+
+cat("=== 7. Biological Interpretation ===\n\n")
+cat("The Tuft cell population shows characteristics consistent with:\n")
+cat("- Chemosensory function in intestinal epithelium\n")
+cat("- Immune modulation through cytokine secretion\n")
+cat("- Response to PEA-induced changes\n")
+cat("- Potential role in tissue homeostasis\n\n")
+
+cat("=== 8. Data Availability ===\n\n")
+print(data_summary)
+
+cat("\n=============================================================================\n")
+cat("Analysis Complete!\n")
+cat("=============================================================================\n")
+sink()
+
+# 保存Seurat对象
+saveRDS(seurat_tuft, file.path(tuft_dir, "seurat_tuft_comprehensive.rds"))
+
+# 创建结果摘要
+results_summary <- data.frame(
+  Metric = c("Total Tuft Cells", "BHI Cells", "PEA Cells", "Fold Change",
+             "Subclusters", "Functional Modules", "Available Markers"),
+  Value = c(ncol(seurat_tuft), tuft_bhi, tuft_pea, 
+           round(fold_change, 2),
+           length(unique(seurat_tuft$tuft_subcluster)),
+           length(module_cols),
+           length(available_markers)),
+  stringsAsFactors = FALSE
+)
+
+safe_save_data(results_summary, 
+               file.path(tuft_dir, "tuft_analysis_summary.csv"))
+
+cat("\n=============================================================================\n")
+cat("===== All Analysis Steps Completed Successfully! =====\n")
+cat("=============================================================================\n\n")
+
+cat("Output Summary:\n")
+cat(sprintf("Main directory: %s\n", tuft_dir))
+cat("Generated files:\n")
+cat("  - Comprehensive analysis report (TXT)\n")
+cat("  - Data availability report (CSV)\n")
+cat("  - Analysis summary (CSV)\n")
+cat("  - Annotated Seurat object (RDS)\n")
+cat("  - 8 subdirectories with detailed results\n")
+cat("  - Multiple figures (PDF + PNG)\n")
+cat("  - Multiple data tables (CSV)\n\n")
+
+cat("Key Findings:\n")
+cat(sprintf("  - Tuft cells: %.2f-fold change in PEA\n", fold_change))
+cat(sprintf("  - %d subclusters identified\n", length(unique(seurat_tuft$tuft_subcluster))))
+cat(sprintf("  - %d functional modules analyzed\n", length(module_cols)))
+cat(sprintf("  - %d classical markers detected\n", length(available_markers)))
+
+if (exists("tuft_deg")) {
+  cat(sprintf("  - %d differential genes identified\n", 
+             nrow(filter(tuft_deg, p_val_adj < 0.05, abs(avg_log2FC) > 0.5))))
+}
+
+cat("\nAnalysis pipeline completed successfully!\n")
+cat("Please review the comprehensive report for detailed biological interpretation.\n")
+cat(sprintf("\nTotal runtime: %.2f minutes\n", 
+           as.numeric(difftime(Sys.time(), start_time, units = "mins"))))
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
