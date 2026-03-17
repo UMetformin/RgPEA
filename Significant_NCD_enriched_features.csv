@@ -1,0 +1,2 @@
+feature,source,pvalue,ncd_mean,healthy_mean,fold_change,ncd_higher,fdr
+Styrene,Metabolite,0.006106206233182797,0.5260437173212327,-0.7264413239198034,1.252485041241036,True,0.016961683981063326
