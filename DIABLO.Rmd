@@ -1,0 +1,334 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(mixOmics)
+  library(ggplot2)
+  library(dplyr)
+  library(viridis)
+  library(BiocParallel)
+
+  # Memory optimization
+  options(expressions = 500000)
+  gc()
+
+  # Set working directory and create output folder
+  output_dir <- "C:/Users/ASUS/Desktop/Gut/DIABLO"
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  cat("Loading data...\n")
+  # Load data
+  microbiome <- read.csv("C:/Users/ASUS/Desktop/Gut/Gut microbiota.csv", row.names = 1, check.names = FALSE)
+  metab_neg <- readxl::read_excel("C:/Users/ASUS/Desktop/Gut/Metabolites quantification profiles in negative ion modes.xlsx")
+  metab_pos <- readxl::read_excel("C:/Users/ASUS/Desktop/Gut/Metabolites quantification profiles in positive ion modes.xlsx")
+
+  # Extract species-level microbiome data
+  extract_species <- function(idx) {
+    if (grepl("\\|s__", idx)) {
+      parts <- strsplit(idx, "\\|")[[1]]
+      species_part <- parts[grepl("^s__", parts)]
+      if (length(species_part) > 0) {
+        return(gsub("^s__", "", species_part[1]))
+      }
+    }
+    return(NA)
+  }
+
+  species_names <- sapply(rownames(microbiome), extract_species)
+  microbiome <- microbiome[!is.na(species_names), ]
+  rownames(microbiome) <- species_names[!is.na(species_names)]
+  microbiome <- as.data.frame(t(microbiome))
+  microbiome <- microbiome[, !duplicated(colnames(microbiome))]
+
+  # Process metabolomics data
+  metab_neg$CompoundName <- ifelse(is.na(metab_neg$Name), metab_neg$Compound_ID, metab_neg$Name)
+  metab_pos$CompoundName <- ifelse(is.na(metab_pos$Name), metab_pos$Compound_ID, metab_pos$Name)
+
+  metab_neg_mat <- as.data.frame(t(metab_neg[, sapply(metab_neg, is.numeric)]))
+  colnames(metab_neg_mat) <- metab_neg$CompoundName
+  metab_pos_mat <- as.data.frame(t(metab_pos[, sapply(metab_pos, is.numeric)]))
+  colnames(metab_pos_mat) <- metab_pos$CompoundName
+
+  metabolome <- cbind(metab_neg_mat, metab_pos_mat)
+  metabolome <- metabolome[, !duplicated(colnames(metabolome))]
+
+  # Free memory
+  rm(metab_neg, metab_pos, metab_neg_mat, metab_pos_mat)
+  gc()
+
+  # Filter metabolites
+  missing_pct <- colSums(metabolome == 0) / nrow(metabolome)
+  metabolome <- metabolome[, missing_pct <= 0.5]
+  detection_rate <- colSums(metabolome > 0) / nrow(metabolome)
+  metabolome <- metabolome[, detection_rate >= 0.1]
+
+  # Impute zeros
+  for (col in colnames(metabolome)) {
+    min_val <- min(metabolome[metabolome[, col] > 0, col], na.rm = TRUE)
+    if (!is.na(min_val) && min_val > 0) {
+      metabolome[metabolome[, col] == 0, col] <- min_val / 2
+    } else {
+      metabolome[metabolome[, col] == 0, col] <- 1e-6
+    }
+  }
+
+  # Match sample names
+  rownames(microbiome) <- gsub(" ", "_", rownames(microbiome))
+  rownames(metabolome) <- gsub(" ", "_", rownames(metabolome))
+  common_samples <- intersect(rownames(microbiome), rownames(metabolome))
+  common_samples <- sort(common_samples)
+
+  mic_df <- microbiome[common_samples, ]
+  metab_df <- metabolome[common_samples, ]
+
+  rm(microbiome, metabolome)
+  gc()
+
+  # Create outcome variable
+  Y <- factor(ifelse(grepl("NCD", common_samples), "NCD", "Normal"), levels = c("Normal", "NCD"))
+  names(Y) <- common_samples
+
+  # CLR transformation for microbiome
+  cat("Transforming data...\n")
+  mic_df <- apply(mic_df, 2, function(x) {
+    x[x == 0] <- 0.5
+    log(x) - mean(log(x))
+  })
+  mic_df <- as.data.frame(mic_df)
+
+  # Log2 + Pareto scaling for metabolome
+  metab_df <- log2(metab_df + 1)
+  metab_centered <- sweep(metab_df, 2, colMeans(metab_df), "-")
+  metab_df <- sweep(metab_centered, 2, sqrt(apply(metab_df, 2, sd)), "/")
+  metab_df <- as.data.frame(metab_df)
+
+  rm(metab_centered)
+  gc()
+
+  # Remove near-zero variance and zero-variance features
+  cat("Filtering low-variance features...\n")
+
+  # Simple variance-based filtering (more robust than nearZeroVar)
+  mic_vars <- apply(mic_df, 2, var, na.rm = TRUE)
+  mic_keep <- mic_vars > 1e-10  # Keep features with variance > threshold
+  if (sum(!mic_keep) > 0) {
+    cat("Removing", sum(!mic_keep), "low-variance features from microbiome\n")
+    mic_df <- mic_df[, mic_keep, drop = FALSE]
+  }
+
+  metab_vars <- apply(metab_df, 2, var, na.rm = TRUE)
+  metab_keep <- metab_vars > 1e-10
+  if (sum(!metab_keep) > 0) {
+    cat("Removing", sum(!metab_keep), "low-variance features from metabolome\n")
+    metab_df <- metab_df[, metab_keep, drop = FALSE]
+  }
+
+  cat("After filtering:\n")
+  cat("  Microbiome features:", ncol(mic_df), "\n")
+  cat("  Metabolome features:", ncol(metab_df), "\n")
+
+  # Prepare data list
+  X <- list(metabolome = metab_df, microbiome = mic_df)
+
+  # Design matrix
+  design <- matrix(0.1, ncol = 2, nrow = 2, dimnames = list(names(X), names(X)))
+  diag(design) <- 0
+  design["metabolome", "microbiome"] <- design["microbiome", "metabolome"] <- 0.8
+
+  # Reduced parameter tuning for memory efficiency
+  set.seed(42)
+  test.keepX <- list(
+    metabolome = c(20, 40),
+    microbiome = c(20, 40)
+  )
+
+  cat("\nStarting parameter tuning...\n")
+  tune.diablo <- tune.block.splsda(
+    X = X,
+    Y = Y,
+    ncomp = 2,
+    test.keepX = test.keepX,
+    design = design,
+    validation = "Mfold",
+    folds = 5,
+    nrepeat = 10,
+    dist = "centroids.dist",
+    max.iter = 100,
+    BPPARAM = SerialParam()
+  )
+
+  opt.keepX <- tune.diablo$choice.keepX
+  cat("\nOptimal keepX:\n")
+  print(opt.keepX)
+
+  gc()
+
+  # Final DIABLO model
+  cat("\nFitting final DIABLO model...\n")
+  diablo.model <- block.splsda(
+    X = X,
+    Y = Y,
+    ncomp = 2,
+    keepX = opt.keepX,
+    design = design,
+    max.iter = 100
+  )
+
+  # Extract selected features
+  all_metab_selected <- character()
+  all_mic_selected <- character()
+
+  for (comp_i in 1:2) {
+    selected_comp <- selectVar(diablo.model, comp = comp_i)
+    all_metab_selected <- c(all_metab_selected, selected_comp$metabolome$name)
+    all_mic_selected <- c(all_mic_selected, selected_comp$microbiome$name)
+  }
+
+  metab_selected <- unique(all_metab_selected)
+  mic_selected <- unique(all_mic_selected)
+
+  target_metab <- grep("phenethylamine", metab_selected, ignore.case = TRUE, value = TRUE)
+  target_mic <- grep("Ruminococcus gnavus", mic_selected, ignore.case = TRUE, value = TRUE)
+
+  cat("\n=== SELECTED FEATURES ===\n")
+  cat("\nMetabolome (", length(metab_selected), " features):\n", sep = "")
+  for (i in seq_along(metab_selected)) {
+    marker <- ifelse(metab_selected[i] %in% target_metab, " *** TARGET ***", "")
+    cat(sprintf("%d. %s%s\n", i, metab_selected[i], marker))
+  }
+
+  cat("\nMicrobiome (", length(mic_selected), " features):\n", sep = "")
+  for (i in seq_along(mic_selected)) {
+    marker <- ifelse(mic_selected[i] %in% target_mic, " *** TARGET ***", "")
+    cat(sprintf("%d. %s%s\n", i, mic_selected[i], marker))
+  }
+
+  if (length(target_metab) > 0) cat("\n✓ Found Phenethylamine!\n")
+  if (length(target_mic) > 0) cat("✓ Found Ruminococcus gnavus!\n")
+
+  # Generate figures
+  cat("\nGenerating figures...\n")
+
+  # Fig1A: Sample plot
+  pdf(file.path(output_dir, "Fig1A_SamplePlot.pdf"), width = 8, height = 6)
+  plotIndiv(diablo.model, comp = c(1, 2), group = Y, ind.names = FALSE,
+            ellipse = TRUE, legend = TRUE, title = "DIABLO Sample Plot",
+            col.per.group = viridis(2), style = "ggplot2")
+  dev.off()
+
+  png(file.path(output_dir, "Fig1A_SamplePlot.png"), width = 2400, height = 1800, res = 300)
+  plotIndiv(diablo.model, comp = c(1, 2), group = Y, ind.names = FALSE,
+            ellipse = TRUE, legend = TRUE, title = "DIABLO Sample Plot",
+            col.per.group = viridis(2), style = "ggplot2")
+  dev.off()
+
+  # Fig1B: Circos plot
+  pdf(file.path(output_dir, "Fig1B_CircosPlot.pdf"), width = 10, height = 10)
+  circosPlot(diablo.model, cutoff = 0.7, comp = 1, size.variables = 0.5)
+  dev.off()
+
+  png(file.path(output_dir, "Fig1B_CircosPlot.png"), width = 3000, height = 3000, res = 300)
+  circosPlot(diablo.model, cutoff = 0.7, comp = 1, size.variables = 0.5)
+  dev.off()
+
+  # Fig1C: Heatmap
+  pdf(file.path(output_dir, "Fig1C_Heatmap.pdf"), width = 12, height = 10)
+  cimDiablo(diablo.model, comp = 1:2, margins = c(10, 5),
+            legend.position = "right", size.legend = 1.2)
+  dev.off()
+
+  png(file.path(output_dir, "Fig1C_Heatmap.png"), width = 3600, height = 3000, res = 300)
+  cimDiablo(diablo.model, comp = 1:2, margins = c(10, 5),
+            legend.position = "right", size.legend = 1.2)
+  dev.off()
+
+  # Fig1D: Loading plot microbiome
+  pdf(file.path(output_dir, "Fig1D_LoadingsMicrobiome.pdf"), width = 10, height = 8)
+  plotLoadings(diablo.model, comp = 1, contrib = "max", method = "mean",
+               block = "microbiome", ndisplay = 20, title = "Microbiome Loadings")
+  dev.off()
+
+  png(file.path(output_dir, "Fig1D_LoadingsMicrobiome.png"), width = 3000, height = 2400, res = 300)
+  plotLoadings(diablo.model, comp = 1, contrib = "max", method = "mean",
+               block = "microbiome", ndisplay = 20, title = "Microbiome Loadings")
+  dev.off()
+
+  # Fig1E: Loading plot metabolome
+  pdf(file.path(output_dir, "Fig1E_LoadingsMetabolome.pdf"), width = 10, height = 8)
+  plotLoadings(diablo.model, comp = 1, contrib = "max", method = "mean",
+               block = "metabolome", ndisplay = 20, title = "Metabolome Loadings")
+  dev.off()
+
+  png(file.path(output_dir, "Fig1E_LoadingsMetabolome.png"), width = 3000, height = 2400, res = 300)
+  plotLoadings(diablo.model, comp = 1, contrib = "max", method = "mean",
+               block = "metabolome", ndisplay = 20, title = "Metabolome Loadings")
+  dev.off()
+
+  # Fig1F: CIM
+  pdf(file.path(output_dir, "Fig1F_CIM.pdf"), width = 14, height = 12)
+  cimDiablo(diablo.model, comp = 1:2, margins = c(10, 5))
+  dev.off()
+
+  png(file.path(output_dir, "Fig1F_CIM.png"), width = 4200, height = 3600, res = 300)
+  cimDiablo(diablo.model, comp = 1:2, margins = c(10, 5))
+  dev.off()
+
+  # Network plot
+  pdf(file.path(output_dir, "Network_Plot.pdf"), width = 12, height = 10)
+  network(diablo.model, blocks = c(1, 2), cutoff = 0.7, comp = 1)
+  dev.off()
+
+  png(file.path(output_dir, "Network_Plot.png"), width = 3600, height = 3000, res = 300)
+  network(diablo.model, blocks = c(1, 2), cutoff = 0.7, comp = 1)
+  dev.off()
+
+  # Variable plot
+  pdf(file.path(output_dir, "Variable_Plot.pdf"), width = 10, height = 8)
+  plotVar(diablo.model, comp = c(1, 2), cutoff = 0.7, legend = TRUE,
+          var.names = FALSE, style = "ggplot2")
+  dev.off()
+
+  png(file.path(output_dir, "Variable_Plot.png"), width = 3000, height = 2400, res = 300)
+  plotVar(diablo.model, comp = c(1, 2), cutoff = 0.7, legend = TRUE,
+          var.names = FALSE, style = "ggplot2")
+  dev.off()
+
+  # Performance assessment
+  cat("\nAssessing model performance...\n")
+  perf.diablo <- perf(diablo.model, validation = "Mfold", folds = 5,
+                      nrepeat = 10, BPPARAM = SerialParam())
+
+  pdf(file.path(output_dir, "Performance.pdf"), width = 10, height = 8)
+  plot(perf.diablo)
+  dev.off()
+
+  png(file.path(output_dir, "Performance.png"), width = 3000, height = 2400, res = 300)
+  plot(perf.diablo)
+  dev.off()
+
+  # Save results
+  saveRDS(diablo.model, file.path(output_dir, "diablo_model.rds"))
+  saveRDS(list(
+    metab_selected = metab_selected,
+    mic_selected = mic_selected,
+    target_metab = target_metab,
+    target_mic = target_mic,
+    opt_keepX = opt.keepX,
+    perf = perf.diablo
+  ), file.path(output_dir, "diablo_results.rds"))
+
+  cat("\n=== ANALYSIS COMPLETE ===\n")
+  cat("All figures saved to:", output_dir, "\n")
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
